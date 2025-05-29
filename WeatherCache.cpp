@@ -1,10 +1,10 @@
 #include "WeatherCache.h"
 #include "DisplayHelpers.h"
-#include "secrets.h"
 #include <Firebase_ESP_Client.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include "DeviceRegistration.h"
+#include "RemoteConfigManager.h"
 
 extern FirebaseData fbdo;
 extern String getSanitizedMac();
@@ -32,10 +32,15 @@ void updateWeatherCache() {
 
   Serial.printf("📍 Lat: %.4f | Lon: %.4f\n", lat, lon);
   Serial.print("📏 Units: "); Serial.println(units);
+  String apiKey = RemoteConfigManager::get("OPENWEATHER_API_KEY", "");
+  if (apiKey == "") {
+    Serial.println("❌ API key for Weather not found in secrets.");
+    return;
+  }
 
   String query = "http://api.openweathermap.org/data/2.5/weather?lat=" + String(lat, 4)
                + "&lon=" + String(lon, 4)
-               + "&appid=" + OPENWEATHER_API_KEY + "&units=" + units;
+               + "&appid=" + apiKey + "&units=" + units;
 
   Serial.println("🌍 OpenWeather query: " + query);
 

@@ -23,6 +23,7 @@ void ClockApp::loop() {
 }
 
 void ClockApp::redraw(bool force, int xOffset) {
+  Serial.println("⏰ Formatted time: " + timeCache.getFormattedTime());
   if (isUpdating || (!force && !getNeedsRedraw())) return;
 
   String current = timeCache.getFormattedTime();

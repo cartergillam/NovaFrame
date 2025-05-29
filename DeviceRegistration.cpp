@@ -4,7 +4,9 @@
 #include <ArduinoJson.h>
 #include <WiFi.h>
 #include <Firebase_ESP_Client.h>
-#include "secrets.h"
+#include "SecretsManager.h"
+#include <LittleFS.h>
+#include "RemoteConfigManager.h"
 
 FirebaseData fbdo;
 FirebaseAuth auth;
@@ -43,10 +45,6 @@ void initializeWiFi() {
     Serial.println("✅ WiFi connected successfully.");
     showWifiInfo();
     delay(2000);
-    
-    // ✅ Always set deviceID before returning!
-    deviceID = getSanitizedMac();
-    Serial.println("📟 deviceID set to: " + deviceID);
     return;
   }
 
@@ -73,27 +71,32 @@ void initializeWiFi() {
     matrix.show();
     delay(2000);
   }
-
-  // ✅ Always set deviceID no matter what
-  deviceID = getSanitizedMac();
-  Serial.println("📟 deviceID set to: " + deviceID);
 }
 
 void initializeFirebase() {
-  config.api_key = FIREBASE_API_KEY;
-  config.database_url = FIREBASE_HOST;
-  auth.user.email = FIREBASE_EMAIL;
-  auth.user.password = FIREBASE_PASSWORD;
+  if (!SecretsManager::load()) {
+    Serial.println("❌ Could not load secrets");
+    return;
+  }
+
+  config.api_key = std::string(SecretsManager::get("FIREBASE_API_KEY").c_str());
+  config.database_url = std::string(SecretsManager::get("FIREBASE_HOST").c_str());
+  auth.user.email = std::string(SecretsManager::get("FIREBASE_EMAIL").c_str());
+  auth.user.password = std::string(SecretsManager::get("FIREBASE_PASSWORD").c_str());
 
   Firebase.begin(&config, &auth);
   Firebase.reconnectWiFi(true);
   Serial.println("Waiting for Firebase token...");
   while (!Firebase.ready()) delay(100);
+  deviceID = getSanitizedMac();
+  Serial.println("📟 deviceID set to: " + deviceID);
+  RemoteConfigManager::begin();
 }
 
 void fetchAndStoreTimezone(float lat, float lon) {
   HTTPClient http;
-  String url = "https://api.ipgeolocation.io/timezone?apiKey=" + String(IP_GEO_LOCATION_API_KEY) +
+  String apiKey = RemoteConfigManager::get("IP_GEO_LOCATION_API_KEY", "");
+  String url = "https://api.ipgeolocation.io/timezone?apiKey=" + apiKey +
                "&lat=" + String(lat, 4) + "&long=" + String(lon, 4);
   http.begin(url);
   Serial.println("Time zone query: " + url);
@@ -116,17 +119,15 @@ void fetchAndStoreTimezone(float lat, float lon) {
 void registerDeviceInFirebase() {
   Serial.println("📝 Registering device in Firebase...");
 
-  deviceID = auth.token.uid.c_str();
   String devicePath = "/novaFrame/devices/" + deviceID;
   String settingsPath = devicePath + "/settings";
   String appSeqPath = settingsPath + "/appSequence";
   String appsPath = devicePath + "/apps";
 
-  // ✅ Create settings node if missing
   if (!Firebase.RTDB.getJSON(&fbdo, settingsPath.c_str())) {
     Serial.println("📁 Settings node missing, creating empty shell.");
     FirebaseJson patch;
-    patch.set("placeholder", true);  // harmless dummy key
+    patch.set("placeholder", true);
     if (!Firebase.RTDB.updateNode(&fbdo, settingsPath.c_str(), &patch)) {
       Serial.printf("❌ Failed to create settings node: %s\n", fbdo.errorReason().c_str());
     } else {
@@ -134,7 +135,6 @@ void registerDeviceInFirebase() {
     }
   }
 
-  // 📦 Ensure at least one app is defined in the apps block
   FirebaseJson defaultAppConfig;
   defaultAppConfig.set("duration", 10000);
   defaultAppConfig.set("enabled", true);
@@ -151,7 +151,6 @@ void registerDeviceInFirebase() {
     Serial.println("📦 clock app already defined in Firebase.");
   }
 
-  // 🔁 Validate or create appSequence
   bool hasValidSequence = false;
   if (Firebase.RTDB.getArray(&fbdo, appSeqPath.c_str())) {
     DynamicJsonDocument doc(1024);
@@ -176,7 +175,6 @@ void registerDeviceInFirebase() {
     FirebaseJson json;
     json.set("appSequence", defaultSeq);
 
-    // Write the full settings object, merging with what's already there
     if (!Firebase.RTDB.updateNode(&fbdo, settingsPath.c_str(), &json)) {
       Serial.printf("❌ Failed to write default appSequence: %s\n", fbdo.errorReason().c_str());
     } else {
@@ -184,7 +182,6 @@ void registerDeviceInFirebase() {
     }
   }
 
-  // 🌡 Optional settings
   String unitsPath = settingsPath + "/units";
   String timeFmtPath = settingsPath + "/timeFormat";
   String brightnessPath = settingsPath + "/brightness";
@@ -199,7 +196,7 @@ void registerDeviceInFirebase() {
     timeFormatPreference = constrain(format, 0, 2);
     Serial.printf("🕒 Time format loaded: %d\n", timeFormatPreference);
   } else {
-    timeFormatPreference = 1; // default to 12hr with AM/PM
+    timeFormatPreference = 1;
     if (Firebase.RTDB.setInt(&fbdo, timeFmtPath.c_str(), timeFormatPreference)) {
       Serial.println("🕒 Default time format set to 12hr (1)");
     } else {
@@ -218,7 +215,6 @@ void registerDeviceInFirebase() {
 
   brightnessLevel = constrain(brightness, 1, 10);
 
-  // 🌍 GeoIP
   HTTPClient geoHttp;
   geoHttp.begin("http://ip-api.com/json");
   int code = geoHttp.GET();
@@ -241,4 +237,35 @@ void registerDeviceInFirebase() {
   geoHttp.end();
 
   Serial.println("📍 Settings initialized or updated.");
+}
+
+bool loadSecretsFromFlash() {
+  if (!LittleFS.begin()) {
+    Serial.println("❌ Failed to mount LittleFS");
+    return false;
+  }
+
+  File file = LittleFS.open("/secrets.json", "r");
+  if (!file) {
+    Serial.println("❌ secrets.json not found");
+    return false;
+  }
+
+  DynamicJsonDocument doc(1024);
+  DeserializationError error = deserializeJson(doc, file);
+  file.close();
+
+  if (error) {
+    Serial.println("❌ Failed to parse secrets.json");
+    return false;
+  }
+
+  config.api_key = std::string(doc["FIREBASE_API_KEY"].as<String>().c_str());
+  auth.user.email = std::string(doc["FIREBASE_EMAIL"].as<String>().c_str());
+  auth.user.password = std::string(doc["FIREBASE_PASSWORD"].as<String>().c_str());
+  return true;
+}
+
+String getDeviceID() {
+  return deviceID;
 }

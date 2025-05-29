@@ -1,8 +1,8 @@
 #include "TimeCache.h"
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
-#include "secrets.h"
 #include "DeviceRegistration.h"  // for storedLat, storedLon, timeFormatPreference
+#include "RemoteConfigManager.h"
 
 extern int timeFormatPreference;  // 0 = 12hr no AM/PM, 1 = 12hr with AM/PM, 24 = 24hr
 extern float storedLat;
@@ -26,40 +26,70 @@ void TimeCache::fetchTime() {
     return;
   }
 
+  String apiKey = RemoteConfigManager::get("IP_GEO_LOCATION_API_KEY", "");
+  if (apiKey == "") {
+    Serial.println("❌ API key for timezone not found in secrets.");
+    return;
+  }
+
   HTTPClient http;
-  String query = "https://api.ipgeolocation.io/timezone?apiKey=" + String(IP_GEO_LOCATION_API_KEY) +
+  String query = "https://api.ipgeolocation.io/timezone?apiKey=" + apiKey +
                  "&lat=" + String(storedLat, 4) + "&long=" + String(storedLon, 4);
   http.begin(query);
-  Serial.println("Time zone query: " + query);
+  Serial.println("🌐 Time zone query: " + query);
+
   int code = http.GET();
-
-  if (code == 200) {
-    String payload = http.getString();
-    DynamicJsonDocument doc(2048);
-    DeserializationError err = deserializeJson(doc, payload);
-    if (err) {
-      Serial.print("❌ JSON parse error: ");
-      Serial.println(err.c_str());
-      return;
-    }
-
-    String date = doc["date"];           // "2025-05-22"
-    String time24 = doc["time_24"];      // "16:19:21"
-    String isoTime = date + "T" + time24;
-
-    Serial.println("✅ ISO datetime composed: " + isoTime);
-
-    struct tm t;
-    memset(&t, 0, sizeof(t));
-    strptime(isoTime.c_str(), "%Y-%m-%dT%H:%M:%S", &t);
-
-    baseEpoch = mktime(&t);
-    epochStartMillis = millis();
-
-    Serial.printf("🕒 Epoch set to: %ld\n", baseEpoch);
-  } else {
+  if (code != 200) {
     Serial.println("❌ Time API failed: " + http.errorToString(code));
+    http.end();
+    return;
   }
+
+  String payload = http.getString();
+
+  DynamicJsonDocument doc(2048);
+  DeserializationError err = deserializeJson(doc, payload);
+  if (err) {
+    Serial.print("❌ JSON parse error: ");
+    Serial.println(err.c_str());
+    http.end();
+    return;
+  }
+
+  // Try multiple keys to support both formats
+  String date = doc["date"] | "";
+  String time24 = doc["time_24"] | doc["time_24hr"] | "";
+  String isoTime = "";
+
+  if (doc.containsKey("date_time_24")) {
+    isoTime = doc["date_time_24"].as<String>();
+    Serial.println("✅ Using date_time_24 field.");
+  } else if (date != "" && time24 != "") {
+    isoTime = date + "T" + time24;
+    Serial.println("✅ Composed ISO time from date + time_24.");
+  } else {
+    Serial.println("❌ No valid date/time fields found in API response.");
+    http.end();
+    return;
+  }
+
+  Serial.println("🧪 Composed ISO datetime: " + isoTime);
+
+  struct tm t;
+  memset(&t, 0, sizeof(t));
+  if (!strptime(isoTime.c_str(), "%Y-%m-%dT%H:%M:%S", &t)) {
+    Serial.println("❌ strptime failed. Could not parse time string.");
+    http.end();
+    return;
+  }
+
+  baseEpoch = mktime(&t);
+  epochStartMillis = millis();
+
+  Serial.printf("✅ Parsed Time: %04d-%02d-%02d %02d:%02d:%02d\n",
+                t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
+                t.tm_hour, t.tm_min, t.tm_sec);
+  Serial.printf("🕒 Epoch set to: %ld\n", baseEpoch);
 
   http.end();
 }

@@ -7,7 +7,7 @@
 #include <ArduinoJson.h>
 #include "WiFiPortalCustomizer.h"
 #include "DisplayHelpers.h"
-#include "secrets.h"
+#include <Arduino.h>
 
 #define WIFI_TIMEOUT 15
 
@@ -25,5 +25,7 @@ extern float storedLon;
 void initializeWiFi();
 void initializeFirebase();
 void registerDeviceInFirebase();
+bool loadSecretsFromFlash();
 String getSanitizedMac();
 void fetchAndStoreTimezone(float lat, float lon);
+String getDeviceID(); 

@@ -8,12 +8,12 @@
 #include "WiFiPortalCustomizer.h"
 #include "WeatherCache.h"
 #include "TimeCache.h"
-#include "secrets.h"
 #include <HTTPClient.h>
 #include <Update.h>
 #include <map>
+#include "OTAUpdater.h"
+#include "RemoteConfigManager.h"
 
-#define CURRENT_VERSION "1.0.2"
 #define BUTTON_PIN A1
 #define HOLD_TIME 2000
 
@@ -42,6 +42,7 @@ void setup() {
   showWelcome();
   initializeWiFi();
   initializeFirebase();
+
 
   appRegistry["clock"] = &clockApp;
   appRegistry["clockWeather"] = &clockWeatherApp;
@@ -120,80 +121,5 @@ void loop() {
   }
 
   delay(100);
-}
-
-void checkForOTAUpdate() {
-  isUpdating = true;
-  HTTPClient http;
-  http.begin("https://cartergillam.github.io/novaframe-firmware/version.json");
-  int httpCode = http.GET();
-
-  if (httpCode == 200) {
-    String payload = http.getString();
-    DynamicJsonDocument doc(1024);
-    DeserializationError error = deserializeJson(doc, payload);
-
-    if (error || !doc.containsKey("version") || !doc.containsKey("url")) {
-      Serial.println("❌ Invalid or missing keys in version.json");
-      isUpdating = false;
-      http.end();
-      return;
-    }
-
-    String newVersion = doc["version"];
-    String firmwareURL = doc["url"];
-
-    if (newVersion != CURRENT_VERSION) {
-      matrix.fillScreen(0);
-      showCenteredText("Updating", 2, matrix.color565(255, 255, 255));
-      showCenteredText("Do Not", 12, matrix.color565(255, 255, 255));
-      showCenteredText("Unplug", 22, matrix.color565(255, 255, 255));
-      matrix.show();
-
-      unsigned long waitStart = millis();
-      while (millis() - waitStart < 3000) yield();
-
-      matrix.fillScreen(0);
-      matrix.show();
-
-      Serial.println("🔁 New version available: " + newVersion);
-      Serial.println("⬇️ Downloading update...");
-
-      http.end();
-      http.begin(firmwareURL);
-      int code = http.GET();
-
-      if (code == 200) {
-        int contentLen = http.getSize();
-        if (Update.begin(contentLen)) {
-          WiFiClient* stream = http.getStreamPtr();
-          size_t written = Update.writeStream(*stream);
-
-          if (written == contentLen && Update.end()) {
-            Serial.println("✅ OTA Update complete. Rebooting...");
-            matrix.fillScreen(0);
-            matrix.show();
-            delay(200);
-            ESP.restart();
-          } else {
-            Serial.println("❌ OTA write failed or incomplete");
-          }
-        } else {
-          Serial.println("❌ Not enough space for OTA");
-        }
-      } else {
-        Serial.println("❌ Failed to fetch firmware: " + http.errorToString(code));
-      }
-
-      http.end();
-    } else {
-      Serial.println("✅ Firmware is up to date.");
-      http.end();
-    }
-  } else {
-    Serial.println("❌ Failed to check version.json: " + http.errorToString(httpCode));
-    http.end();
-  }
-
-  isUpdating = false;
+  checkForOTAUpdate();
 }
