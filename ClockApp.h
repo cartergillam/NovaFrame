@@ -10,9 +10,10 @@ public:
 
   void setNeedsRedraw(bool flag) override;
   bool getNeedsRedraw() override;
+  String getAppId() override { return "clock"; }
 
 private:
-  String lastDisplayedTime;
+  String lastDisplayedTime = "";
   int lastMinute = -1;
   bool isUpdating = false;
   bool needsRedraw = true;

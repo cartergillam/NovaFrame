@@ -26,3 +26,5 @@ uint16_t getScaledColor(uint8_t r, uint8_t g, uint8_t b);
 void checkBrightnessUpdate();
 void checkTimeFormatUpdate();
 void checkUnitsUpdate();
+void drawCenteredText(const String& text, int x, int y);
+void drawSmallText(const String& text, int x, int y);

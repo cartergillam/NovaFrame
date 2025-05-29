@@ -8,6 +8,7 @@ class SecretsManager {
 public:
   static bool load();
   static String get(String key);
+  static bool set(String key, String value);
 
 private:
   static DynamicJsonDocument doc;

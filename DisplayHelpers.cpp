@@ -175,3 +175,28 @@ void checkUnitsUpdate() {
     }
   }
 }
+
+void drawCenteredText(const String& text, int x, int y) {
+  int16_t x1, y1;
+  uint16_t w, h;
+
+  matrix.setTextSize(1);
+  matrix.setTextWrap(false);
+  matrix.getTextBounds(text, 0, y, &x1, &y1, &w, &h);
+
+  int16_t xPos = x - w / 2;
+  matrix.setCursor(xPos, y);
+  matrix.setTextColor(getScaledColor(255, 255, 255));
+  matrix.print(text);
+  matrix.show();
+}
+
+void drawSmallText(const String& text, int x, int y) {
+  matrix.setTextSize(1);
+  matrix.setTextWrap(false);
+  matrix.setCursor(x, y);
+  matrix.setTextColor(getScaledColor(192, 192, 192));
+  matrix.print(text);
+  matrix.show();
+}
+

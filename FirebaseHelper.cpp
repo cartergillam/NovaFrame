@@ -2,12 +2,16 @@
 #include <Firebase_ESP_Client.h>
 #include <vector>
 #include <ArduinoJson.h>
-#include "DeviceRegistration.h"  // To access deviceID declared externally
+#include "DeviceRegistration.h"
 
 extern FirebaseData fbdo;
 extern String deviceID;
 
 bool getEnabledAppsFromFirebase(std::vector<String>& enabledApps) {
+  if (!Firebase.ready()) {
+    Serial.println("⚠️ Firebase not ready, skipping appSequence fetch");
+    return false;
+  }
   String appsPath = "/novaFrame/devices/" + deviceID + "/apps";
 
   if (!Firebase.RTDB.getJSON(&fbdo, appsPath.c_str())) {
@@ -16,9 +20,9 @@ bool getEnabledAppsFromFirebase(std::vector<String>& enabledApps) {
   }
 
   String jsonStr;
-  fbdo.jsonObject().toString(jsonStr, true); // Serialize JSON to string
+  fbdo.jsonObject().toString(jsonStr, true);
 
-  StaticJsonDocument<2048> doc; // adjust size if needed
+  StaticJsonDocument<2048> doc;
   DeserializationError err = deserializeJson(doc, jsonStr);
   if (err) {
     Serial.printf("❌ Failed to parse JSON: %s\n", err.c_str());
@@ -37,6 +41,10 @@ bool getEnabledAppsFromFirebase(std::vector<String>& enabledApps) {
 }
 
 bool fetchAppSequenceFromFirebase(std::vector<String>& sequence) {
+  if (!Firebase.ready()) {
+    Serial.println("⚠️ Firebase not ready, skipping appSequence fetch");
+    return false;
+  }
   String path = "/novaFrame/devices/" + deviceID + "/settings/appSequence";
   Serial.println("📡 Fetching appSequence from: " + path);
 
@@ -59,4 +67,24 @@ bool fetchAppSequenceFromFirebase(std::vector<String>& sequence) {
   }
 
   return !sequence.empty();
+}
+
+bool setAppSequenceToFirebase(const std::vector<String>& sequence) {
+  String path = "/novaFrame/devices/" + deviceID + "/settings";
+
+  FirebaseJsonArray jsonArray;
+  for (const auto& app : sequence) {
+    jsonArray.add(app);
+  }
+
+  FirebaseJson json;
+  json.set("appSequence", jsonArray);
+
+  if (!Firebase.RTDB.updateNode(&fbdo, path.c_str(), &json)) {
+    Serial.printf("❌ Failed to write appSequence: %s\n", fbdo.errorReason().c_str());
+    return false;
+  }
+
+  Serial.println("✅ appSequence written to Firebase.");
+  return true;
 }

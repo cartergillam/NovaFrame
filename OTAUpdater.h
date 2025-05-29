@@ -69,6 +69,7 @@ void checkForOTAUpdate() {
 
           if (written == contentLen && Update.end()) {
             Serial.println("✅ OTA Update complete. Rebooting...");
+            SecretsManager::set("CURRENT_VERSION", newVersion);
             matrix.fillScreen(0);
             matrix.show();
             delay(200);

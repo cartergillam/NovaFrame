@@ -13,26 +13,38 @@ extern FirebaseConfig config;
 extern std::map<String, BaseApp*> appRegistry;
 extern String deviceID;
 extern TimeCache timeCache;
+extern AppManager appManager;
 
 void AppManager::init() {
   std::vector<String> loadedApps;
-  if (getEnabledAppsFromFirebase(loadedApps)) {
-    std::vector<String> validApps;
-    for (const auto& app : loadedApps) {
-      if (app.length() > 0 && appRegistry.count(app)) {
-        validApps.push_back(app);
-      } else {
-        Serial.println("⚠️ Skipping invalid app ID: " + app);
-      }
+  if (!getEnabledAppsFromFirebase(loadedApps)) {
+    Serial.println("❌ Could not load enabled apps. Using fallback.");
+    loadedApps.push_back("clock");
+  }
+
+  std::vector<String> validApps;
+  for (const auto& app : loadedApps) {
+    if (app.length() > 0 && appRegistry.count(app)) {
+      validApps.push_back(app);
+    } else {
+      Serial.println("⚠️ Skipping invalid app ID: " + app);
     }
-    enabledApps = validApps;
   }
 
-  if (enabledApps.empty()) {
-    Serial.println("⚠️ No valid apps enabled. Falling back to clock.");
-    enabledApps.push_back("clock");
+  if (validApps.empty()) {
+    validApps.push_back("clock");
+    Serial.println("⚠️ No valid apps. Using fallback: clock");
   }
 
+  std::vector<String> currentSequence;
+  fetchAppSequenceFromFirebase(currentSequence);
+
+  if (currentSequence != validApps) {
+    Serial.println("🔁 Detected mismatch or missing appSequence. Updating Firebase...");
+    setAppSequenceToFirebase(validApps);
+  }
+
+  enabledApps = validApps;
   currentIndex = 0;
   loadApp(enabledApps[currentIndex]);
   lastSwitchTime = millis();
@@ -60,8 +72,14 @@ void AppManager::loop() {
   }
 
   static unsigned long lastPoll = 0;
-  if (now - lastPoll >= 10000) {
+  if (now - lastPoll >= 30000) {  // 🔁 30-second polling interval
     lastPoll = now;
+
+    if (!Firebase.ready()) {
+      Serial.println("⚠️ Firebase not ready. Skipping poll cycle.");
+      return;
+    }
+
     checkBrightnessUpdate();
     checkTimeFormatUpdate();
     checkUnitsUpdate();
@@ -90,18 +108,7 @@ void AppManager::loop() {
         loadApp(enabledApps[currentIndex]);
         lastSwitchTime = now;
 
-        String appSeqPath = "/novaFrame/devices/" + deviceID + "/settings/appSequence";
-        FirebaseJsonArray jsonArray;
-        for (const auto& appId : enabledApps) {
-          jsonArray.add(appId);
-        }
-
-        if (!Firebase.RTDB.setArray(&fbdo, appSeqPath.c_str(), &jsonArray)) {
-          Serial.print("❌ Failed to update appSequence: ");
-          Serial.println(fbdo.errorReason());
-        } else {
-          Serial.println("✅ Updated appSequence in Firebase.");
-        }
+        setAppSequenceToFirebase(enabledApps);
       }
     } else {
       Serial.println("❌ Failed to fetch appSequence from Firebase");
@@ -139,4 +146,9 @@ void AppManager::loadApp(const String& appId) {
 
 BaseApp* AppManager::getActiveApp() {
   return currentApp;
+}
+
+// Global helper that delegates to the AppManager instance
+BaseApp* getActiveApp() {
+  return appManager.getActiveApp();
 }

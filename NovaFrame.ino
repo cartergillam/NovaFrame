@@ -13,6 +13,7 @@
 #include <map>
 #include "OTAUpdater.h"
 #include "RemoteConfigManager.h"
+#include "ForecastApp.h"
 
 #define BUTTON_PIN A1
 #define HOLD_TIME 2000
@@ -22,6 +23,7 @@ ClockApp clockApp;
 ClockWeatherApp clockWeatherApp;
 WeatherApp weatherApp;
 TimeCache timeCache;
+ForecastApp forecastApp;
 
 std::map<String, BaseApp*> appRegistry;
 
@@ -29,6 +31,8 @@ WiFiManager wm;
 unsigned long buttonPressStart = 0;
 bool buttonHeld = false;
 bool isUpdating = false;
+unsigned long lastOTACheck = 0;
+const unsigned long OTA_INTERVAL = 60 * 60 * 1000;
 
 void setup() {
   Serial.begin(115200);
@@ -47,6 +51,7 @@ void setup() {
   appRegistry["clock"] = &clockApp;
   appRegistry["clockWeather"] = &clockWeatherApp;
   appRegistry["weather"] = &weatherApp;
+  appRegistry["forecast"] = &forecastApp;
 
   registerDeviceInFirebase();
   updateWeatherCache();
@@ -121,5 +126,8 @@ void loop() {
   }
 
   delay(100);
-  checkForOTAUpdate();
+  if (millis() - lastOTACheck > OTA_INTERVAL) {
+    checkForOTAUpdate();
+    lastOTACheck = millis();
+  }
 }

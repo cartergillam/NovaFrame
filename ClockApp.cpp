@@ -23,7 +23,6 @@ void ClockApp::loop() {
 }
 
 void ClockApp::redraw(bool force, int xOffset) {
-  Serial.println("⏰ Formatted time: " + timeCache.getFormattedTime());
   if (isUpdating || (!force && !getNeedsRedraw())) return;
 
   String current = timeCache.getFormattedTime();
@@ -39,7 +38,7 @@ void ClockApp::redraw(bool force, int xOffset) {
   if (suffixIndex > 0) {
     timePart = current.substring(0, suffixIndex);
     suffix = current.substring(suffixIndex + 1);
-    timePart += "  ";  // Extra spacing
+    timePart += "    ";  // Extra spacing
     timePart += suffix;
   } else {
     timePart = current;

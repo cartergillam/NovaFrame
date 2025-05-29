@@ -11,6 +11,7 @@ public:
     void redraw(bool force = false, int xOffset = 0) override;  // Called to draw
     void setNeedsRedraw(bool flag) override;    // Force redraw
     bool getNeedsRedraw() override;             // Check if redraw needed
+    String getAppId() override { return "clockWeather"; }
 
 private:
     bool needsRedraw = true;

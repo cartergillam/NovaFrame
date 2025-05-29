@@ -49,3 +49,34 @@ String SecretsManager::get(String key) {
 
   return doc[key] | "";
 }
+
+bool SecretsManager::set(String key, String value) {
+  if (!loaded) {
+    Serial.println("⚠️ Secrets not loaded! Call SecretsManager::load() first.");
+    return false;
+  }
+
+  doc[key] = value;
+
+  String output;
+  serializeJson(doc, output);
+  const char* json = output.c_str();
+
+  const uint32_t secretsOffset = 0x490000;  // same as load()
+  size_t length = strlen(json) + 1;
+
+  esp_err_t err = spi_flash_erase_range(secretsOffset, 0x10000);  // 64KB block
+  if (err != ESP_OK) {
+    Serial.printf("❌ Flash erase failed: %s\n", esp_err_to_name(err));
+    return false;
+  }
+
+  err = spi_flash_write(secretsOffset, json, length);
+  if (err != ESP_OK) {
+    Serial.printf("❌ Flash write failed: %s\n", esp_err_to_name(err));
+    return false;
+  }
+
+  Serial.println("✅ Secrets updated in raw flash!");
+  return true;
+}
