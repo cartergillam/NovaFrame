@@ -29,7 +29,6 @@ void ForecastApp::loop() {
 
 void ForecastApp::redraw(bool force, int xOffset) {
   if (!force && !needsRedraw) return;
-
   matrix.fillScreen(0);
 
   char degree = 247;
@@ -38,34 +37,44 @@ void ForecastApp::redraw(bool force, int xOffset) {
   String high2 = weatherData.forecastHigh2 + degree;
   String low2  = weatherData.forecastLow2 + degree;
 
-  uint16_t gray = getScaledColor(192, 192, 192);
-  uint16_t blue = getScaledColor(0, 128, 255);
+  uint16_t white = getScaledColor(255, 255, 255);
+  uint16_t dividerBlue = getScaledColor(0, (uint8_t)(128 * 0.3), (uint8_t)(255 * 0.3));
 
-  // --- Day 1 ---
-  drawWeatherIcon(weatherData.icon1, scrollX + 2, 2);              // Bitmap icon
-  drawSmallText(weatherData.forecastDay1, scrollX + 2, 24);        // Day name
+  // ───── LEFT SIDE ─────
+  drawWeatherIcon(weatherData.icon1, -4, -8); // 32x32, left-aligned
+  drawSmallText(weatherData.forecastDay1, 2, 24); // bottom-left corner
 
-  matrix.setTextColor(gray);
-  matrix.setCursor(scrollX + 2, 14);
+  matrix.setTextColor(white);
+
+  int16_t x1, y1;
+  uint16_t w, h;
+  int rightEdgeLeft = 41;  // 1px left of divider
+
+  matrix.getTextBounds(high1.c_str(), 0, 0, &x1, &y1, &w, &h);
+  matrix.setCursor(rightEdgeLeft - w, 14);
   matrix.print(high1);
-  matrix.setCursor(scrollX + 2, 20);
+
+  matrix.getTextBounds(low1.c_str(), 0, 0, &x1, &y1, &w, &h);
+  matrix.setCursor(rightEdgeLeft - w, 24);
   matrix.print(low1);
 
-  // --- Divider ---
+  // ───── DIVIDER ─────
   for (int y = 0; y < 32; y++) {
-    matrix.drawPixel(scrollX + 31, y, blue);
+    matrix.drawPixel(42, y, dividerBlue);
   }
 
-  // --- Day 2 ---
-  drawSmallText(weatherData.forecastDay2, scrollX + 36, 0);
+  // ───── RIGHT SIDE ─────
+  drawSmallText(weatherData.forecastDay2, 45, 1); // top-right
 
-  matrix.setTextColor(gray);
-  matrix.setCursor(scrollX + 36, 12);
+  int rightEdgeRight = 63; // max pixel on 64px width
+
+  matrix.getTextBounds(high2.c_str(), 0, 0, &x1, &y1, &w, &h);
+  matrix.setCursor(rightEdgeRight - w, 14);
   matrix.print(high2);
-  matrix.setCursor(scrollX + 36, 20);
-  matrix.print(low2);
 
-  drawWeatherIcon(weatherData.icon2, scrollX + 36, 26);            // Bitmap icon
+  matrix.getTextBounds(low2.c_str(), 0, 0, &x1, &y1, &w, &h);
+  matrix.setCursor(rightEdgeRight - w, 24);
+  matrix.print(low2);
 
   matrix.show();
 }

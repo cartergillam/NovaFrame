@@ -168,6 +168,7 @@ void checkUnitsUpdate() {
       units = newVal;
       Serial.println("🔄 Units updated to: " + units);
       lastWeatherFetchTime = 0;
+      updateWeatherCache();
       BaseApp* current = appManager.getActiveApp();
       if (current) {
         current->setNeedsRedraw(true);

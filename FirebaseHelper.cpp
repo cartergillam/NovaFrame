@@ -7,13 +7,21 @@
 extern FirebaseData fbdo;
 extern String deviceID;
 
-bool getEnabledAppsFromFirebase(std::vector<String>& enabledApps) {
+bool getEnabledAppsFromFirebase(std::vector<String>& enabledApps, bool forceRefresh) {
+  static String lastJsonStr = "";
+  static std::vector<String> lastEnabledApps;
+
+  if (!forceRefresh && !lastEnabledApps.empty()) {
+    enabledApps = lastEnabledApps;
+    return true;
+  }
+
   if (!Firebase.ready()) {
-    Serial.println("⚠️ Firebase not ready, skipping appSequence fetch");
+    Serial.println("⚠️ Firebase not ready, skipping app fetch");
     return false;
   }
-  String appsPath = "/novaFrame/devices/" + deviceID + "/apps";
 
+  String appsPath = "/novaFrame/devices/" + deviceID + "/apps";
   if (!Firebase.RTDB.getJSON(&fbdo, appsPath.c_str())) {
     Serial.printf("❌ Failed to get apps JSON: %s\n", fbdo.errorReason().c_str());
     return false;
@@ -22,6 +30,12 @@ bool getEnabledAppsFromFirebase(std::vector<String>& enabledApps) {
   String jsonStr;
   fbdo.jsonObject().toString(jsonStr, true);
 
+  // If same as last successful JSON, skip parsing
+  if (!forceRefresh && jsonStr == lastJsonStr) {
+    enabledApps = lastEnabledApps;
+    return true;
+  }
+
   StaticJsonDocument<2048> doc;
   DeserializationError err = deserializeJson(doc, jsonStr);
   if (err) {
@@ -29,22 +43,35 @@ bool getEnabledAppsFromFirebase(std::vector<String>& enabledApps) {
     return false;
   }
 
+  std::vector<String> apps;
   for (JsonPair kv : doc.as<JsonObject>()) {
     const char* appName = kv.key().c_str();
     JsonObject appData = kv.value().as<JsonObject>();
     if (appData["enabled"] == true) {
-      enabledApps.push_back(String(appName));
+      apps.push_back(String(appName));
     }
   }
 
+  enabledApps = apps;
+  lastEnabledApps = apps;
+  lastJsonStr = jsonStr;
   return true;
 }
 
-bool fetchAppSequenceFromFirebase(std::vector<String>& sequence) {
+bool fetchAppSequenceFromFirebase(std::vector<String>& sequence, bool forceRefresh) {
+  static String lastJsonStr = "";
+  static std::vector<String> lastSequence;
+
+  if (!forceRefresh && !lastSequence.empty()) {
+    sequence = lastSequence;
+    return true;
+  }
+
   if (!Firebase.ready()) {
     Serial.println("⚠️ Firebase not ready, skipping appSequence fetch");
     return false;
   }
+
   String path = "/novaFrame/devices/" + deviceID + "/settings/appSequence";
   Serial.println("📡 Fetching appSequence from: " + path);
 
@@ -54,19 +81,35 @@ bool fetchAppSequenceFromFirebase(std::vector<String>& sequence) {
   }
 
   FirebaseJsonArray& arr = fbdo.jsonArray();
-  size_t len = arr.size();
 
-  Serial.println("✅ appSequence is a valid array with " + String(len) + " items.");
+  String jsonStr;
+  arr.toString(jsonStr, true);
 
-  for (size_t i = 0; i < len; i++) {
+  if (!forceRefresh && jsonStr == lastJsonStr) {
+    sequence = lastSequence;
+    return true;
+  }
+
+  std::vector<String> newSequence;
+  for (size_t i = 0; i < arr.size(); i++) {
     FirebaseJsonData val;
     if (arr.get(val, i) && val.type == "string") {
-      sequence.push_back(val.stringValue);
+      newSequence.push_back(val.stringValue);
       Serial.println("➡️ App[" + String(i) + "]: " + val.stringValue);
     }
   }
 
-  return !sequence.empty();
+  if (newSequence.empty()) {
+    Serial.println("⚠️ Empty or invalid appSequence.");
+    return false;
+  }
+
+  lastSequence = newSequence;
+  lastJsonStr = jsonStr;
+  sequence = newSequence;
+
+  Serial.println("✅ appSequence is a valid array with " + String(sequence.size()) + " items.");
+  return true;
 }
 
 bool setAppSequenceToFirebase(const std::vector<String>& sequence) {

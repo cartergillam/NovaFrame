@@ -21,11 +21,15 @@ void TimeCache::updateIfNeeded() {
 }
 
 void TimeCache::fetchTime() {
+  
   if (storedLat == 0.0 || storedLon == 0.0) {
     Serial.println("⚠️ Lat/Lon not set, skipping time fetch");
     return;
   }
-
+  if (!Firebase.ready()) {
+    Serial.println("⚠️ Firebase not ready — skipping time fetch.");
+    return;
+  }
   String apiKey = RemoteConfigManager::get("IP_GEO_LOCATION_API_KEY", "");
   if (apiKey == "") {
     Serial.println("❌ API key for timezone not found in secrets.");

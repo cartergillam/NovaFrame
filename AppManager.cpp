@@ -17,7 +17,7 @@ extern AppManager appManager;
 
 void AppManager::init() {
   std::vector<String> loadedApps;
-  if (!getEnabledAppsFromFirebase(loadedApps)) {
+  if (!getEnabledAppsFromFirebase(loadedApps, true)) {
     Serial.println("❌ Could not load enabled apps. Using fallback.");
     loadedApps.push_back("clock");
   }
@@ -37,7 +37,7 @@ void AppManager::init() {
   }
 
   std::vector<String> currentSequence;
-  fetchAppSequenceFromFirebase(currentSequence);
+  fetchAppSequenceFromFirebase(currentSequence, true);
 
   if (currentSequence != validApps) {
     Serial.println("🔁 Detected mismatch or missing appSequence. Updating Firebase...");
@@ -72,20 +72,25 @@ void AppManager::loop() {
   }
 
   static unsigned long lastPoll = 0;
-  if (now - lastPoll >= 30000) {  // 🔁 30-second polling interval
+  static unsigned long pollInterval = 30000;  // Start at 30 seconds
+  static int failureCount = 0;
+  const unsigned long maxPollInterval = 5 * 60 * 1000;  // Cap at 5 mins
+
+  if (now - lastPoll >= pollInterval) {
     lastPoll = now;
 
     if (!Firebase.ready()) {
       Serial.println("⚠️ Firebase not ready. Skipping poll cycle.");
+      failureCount++;
+      pollInterval = min(pollInterval * 2, maxPollInterval);
       return;
     }
 
-    checkBrightnessUpdate();
-    checkTimeFormatUpdate();
-    checkUnitsUpdate();
-
     std::vector<String> updatedApps;
-    if (getEnabledAppsFromFirebase(updatedApps)) {
+    if (getEnabledAppsFromFirebase(updatedApps, true)) {
+      failureCount = 0;
+      pollInterval = 30000;  // Reset interval on success
+
       std::vector<String> validApps;
       for (const auto& app : updatedApps) {
         if (app.length() > 0 && appRegistry.count(app)) {
@@ -107,10 +112,15 @@ void AppManager::loop() {
         currentIndex = 0;
         loadApp(enabledApps[currentIndex]);
         lastSwitchTime = now;
-
+        if (!Firebase.ready()) {
+          Serial.println("⚠️ Firebase not ready. Skipping app sequence update.");
+          return;
+        }
         setAppSequenceToFirebase(enabledApps);
       }
     } else {
+      failureCount++;
+      pollInterval = min(pollInterval * 2, maxPollInterval);  // Backoff
       Serial.println("❌ Failed to fetch appSequence from Firebase");
     }
   }

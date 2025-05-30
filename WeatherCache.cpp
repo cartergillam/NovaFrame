@@ -17,11 +17,10 @@ extern AppManager appManager;
 
 WeatherData weatherData;
 unsigned long lastWeatherFetchTime = 0;
-const unsigned long WEATHER_CACHE_INTERVAL = 600000; // 10 minutes
+const unsigned long WEATHER_CACHE_INTERVAL = 60UL * 60UL * 1000UL; // 1 hour
 
 void updateWeatherCache() {
   unsigned long now = millis();
-  const unsigned long WEATHER_CACHE_INTERVAL = 30UL * 60UL * 1000UL; // 30 minutes
 
   if (now - lastWeatherFetchTime < WEATHER_CACHE_INTERVAL && lastWeatherFetchTime != 0) {
     return;
@@ -69,6 +68,7 @@ void updateWeatherCache() {
     weatherData.temp      = String((int)round(doc["current"]["temp"].as<float>()));
     weatherData.feelsLike = String((int)round(doc["current"]["feels_like"].as<float>()));
     weatherData.icon      = doc["current"]["weather"][0]["icon"].as<String>();
+    Serial.println("📍 Current icon: " + weatherData.icon);
 
     // Today
     JsonObject today = doc["daily"][0];
@@ -76,13 +76,17 @@ void updateWeatherCache() {
     weatherData.tempLow  = String((int)round(today["temp"]["min"].as<float>()));
     weatherData.forecastHigh1 = weatherData.tempHigh;
     weatherData.forecastLow1  = weatherData.tempLow;
-    weatherData.icon1 = today["weather"][0]["icon"].as<String>();
+
+    // ✅ Use current.icon instead of daily[0]
+    weatherData.icon1 = weatherData.icon;
+    Serial.println("🌤️ icon1 set to current icon: " + weatherData.icon1);
 
     // Tomorrow
     JsonObject tomorrow = doc["daily"][1];
     weatherData.forecastHigh2 = String((int)round(tomorrow["temp"]["max"].as<float>()));
     weatherData.forecastLow2  = String((int)round(tomorrow["temp"]["min"].as<float>()));
     weatherData.icon2 = tomorrow["weather"][0]["icon"].as<String>();
+    Serial.println("🔮 icon2 (tomorrow): " + weatherData.icon2);
 
     // Day names
     time_t todayDT = today["dt"].as<time_t>();
@@ -98,11 +102,13 @@ void updateWeatherCache() {
     lastWeatherFetchTime = now;
     Serial.println("✅ Weather cache updated (One Call)");
     Serial.println("🌡️ Temp now: " + weatherData.temp);
+
     // 🔁 Force ForecastApp to redraw if it's currently showing
     BaseApp* activeApp = getActiveApp();
     if (activeApp != nullptr && activeApp->getAppId() == "forecast") {
       activeApp->setNeedsRedraw(true);
     }
+
   } else {
     Serial.println("❌ OpenWeather HTTP error: " + http.errorToString(code));
   }

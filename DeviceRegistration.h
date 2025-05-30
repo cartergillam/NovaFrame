@@ -24,7 +24,8 @@ extern float storedLon;
 
 void initializeWiFi();
 void initializeFirebase();
-void registerDeviceInFirebase();
+void registerDeviceInFirebase(bool deferGeo); 
+void updateGeoLocationAndTimezone(const String& settingsPath); 
 bool loadSecretsFromFlash();
 String getSanitizedMac();
 void fetchAndStoreTimezone(float lat, float lon);

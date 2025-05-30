@@ -93,31 +93,61 @@ void initializeFirebase() {
   RemoteConfigManager::begin();
 }
 
-void fetchAndStoreTimezone(float lat, float lon) {
-  HTTPClient http;
-  String apiKey = RemoteConfigManager::get("IP_GEO_LOCATION_API_KEY", "");
-  String url = "https://api.ipgeolocation.io/timezone?apiKey=" + apiKey +
-               "&lat=" + String(lat, 4) + "&long=" + String(lon, 4);
-  http.begin(url);
-  Serial.println("Time zone query: " + url);
-  int httpCode = http.GET();
+void updateGeoLocationAndTimezone(const String& settingsPath) {
+  while (!Firebase.ready()) delay(100);
 
-  if (httpCode == 200) {
-    String payload = http.getString();
-    DynamicJsonDocument doc(2048);
-    deserializeJson(doc, payload);
-    String timezone = doc["timezone"];
-    Serial.println("✅ Timezone detected: " + timezone);
-    String path = "/novaFrame/devices/" + deviceID + "/settings/timezone";
-    Firebase.RTDB.setString(&fbdo, path.c_str(), timezone);
-  } else {
-    Serial.println("❌ Failed to fetch timezone: " + http.errorToString(httpCode));
+  float currentLat = 0.0;
+  float currentLon = 0.0;
+
+  Firebase.RTDB.getFloat(&fbdo, (settingsPath + "/lat").c_str());
+  currentLat = fbdo.floatData();
+
+  Firebase.RTDB.getFloat(&fbdo, (settingsPath + "/lon").c_str());
+  currentLon = fbdo.floatData();
+
+  HTTPClient geoHttp;
+  geoHttp.begin("http://ip-api.com/json");
+  int code = geoHttp.GET();
+  if (code != 200) {
+    Serial.println("❌ GeoIP failed: " + geoHttp.errorToString(code));
+    geoHttp.end();
+    return;
   }
-  http.end();
+
+  String payload = geoHttp.getString();
+  geoHttp.end();
+
+  DynamicJsonDocument geoDoc(1024);
+  deserializeJson(geoDoc, payload);
+  float newLat = geoDoc["lat"];
+  float newLon = geoDoc["lon"];
+  String city = geoDoc["city"] | "";
+  String region = geoDoc["region"] | "";
+
+  bool shouldUpdate = fabs(currentLat - newLat) > 0.01 || fabs(currentLon - newLon) > 0.01;
+
+  if (shouldUpdate) {
+    Serial.printf("🌍 Location changed — updating Firebase: (%.4f, %.4f) → (%.4f, %.4f)\n",
+                  currentLat, currentLon, newLat, newLon);
+    Firebase.RTDB.setString(&fbdo, (settingsPath + "/weatherLocation").c_str(), city + "," + region);
+    Firebase.RTDB.setFloat(&fbdo, (settingsPath + "/lat").c_str(), newLat);
+    Firebase.RTDB.setFloat(&fbdo, (settingsPath + "/lon").c_str(), newLon);
+    storedLat = newLat;
+    storedLon = newLon;
+  } else {
+    Serial.println("📍 Location unchanged — skipping Firebase update.");
+    storedLat = currentLat;
+    storedLon = currentLon;
+  }
 }
 
-void registerDeviceInFirebase() {
+void registerDeviceInFirebase(bool deferGeo) {
   Serial.println("📝 Registering device in Firebase...");
+
+  if (!Firebase.ready()) {
+    Serial.println("❌ Firebase not ready — skipping registration.");
+    return;
+  }
 
   String devicePath = "/novaFrame/devices/" + deviceID;
   String settingsPath = devicePath + "/settings";
@@ -128,25 +158,17 @@ void registerDeviceInFirebase() {
     Serial.println("📁 Settings node missing, creating empty shell.");
     FirebaseJson patch;
     patch.set("placeholder", true);
-    if (!Firebase.RTDB.updateNode(&fbdo, settingsPath.c_str(), &patch)) {
-      Serial.printf("❌ Failed to create settings node: %s\n", fbdo.errorReason().c_str());
-    } else {
-      Serial.println("✅ Created empty settings node.");
-    }
+    Firebase.RTDB.updateNode(&fbdo, settingsPath.c_str(), &patch);
   }
-
-  FirebaseJson defaultAppConfig;
-  defaultAppConfig.set("duration", 10000);
-  defaultAppConfig.set("enabled", true);
 
   String clockAppPath = appsPath + "/clock";
   if (!Firebase.RTDB.getJSON(&fbdo, clockAppPath.c_str())) {
+    FirebaseJson defaultAppConfig;
+    defaultAppConfig.set("duration", 10000);
+    defaultAppConfig.set("enabled", true);
+
     Serial.println("⚙️ clock app not defined — auto-creating in /apps.");
-    if (!Firebase.RTDB.setJSON(&fbdo, clockAppPath.c_str(), &defaultAppConfig)) {
-      Serial.printf("❌ Failed to create clock app: %s\n", fbdo.errorReason().c_str());
-    } else {
-      Serial.println("✅ clock app added to Firebase.");
-    }
+    Firebase.RTDB.setJSON(&fbdo, clockAppPath.c_str(), &defaultAppConfig);
   } else {
     Serial.println("📦 clock app already defined in Firebase.");
   }
@@ -155,31 +177,19 @@ void registerDeviceInFirebase() {
   if (Firebase.RTDB.getArray(&fbdo, appSeqPath.c_str())) {
     DynamicJsonDocument doc(1024);
     DeserializationError err = deserializeJson(doc, fbdo.payload().c_str());
-    if (!err && doc.is<JsonArray>() && doc.size() > 0) {
-      hasValidSequence = true;
+    hasValidSequence = !err && doc.is<JsonArray>() && doc.size() > 0;
+    if (hasValidSequence) {
       Serial.printf("✅ appSequence is a valid array with %d items.\n", doc.size());
-    } else {
-      Serial.println("❌ appSequence deserialization failed or is empty.");
     }
-  } else {
-    Serial.println("⚠️ Failed to fetch appSequence.");
-    Serial.printf("❌ Error: %s\n", fbdo.errorReason().c_str());
   }
 
   if (!hasValidSequence) {
     Serial.println("⚠️ appSequence missing or invalid. Writing default...");
-
     FirebaseJsonArray defaultSeq;
     defaultSeq.add("clock");
-
     FirebaseJson json;
     json.set("appSequence", defaultSeq);
-
-    if (!Firebase.RTDB.updateNode(&fbdo, settingsPath.c_str(), &json)) {
-      Serial.printf("❌ Failed to write default appSequence: %s\n", fbdo.errorReason().c_str());
-    } else {
-      Serial.println("✅ Default appSequence written.");
-    }
+    Firebase.RTDB.updateNode(&fbdo, settingsPath.c_str(), &json);
   }
 
   String unitsPath = settingsPath + "/units";
@@ -197,11 +207,8 @@ void registerDeviceInFirebase() {
     Serial.printf("🕒 Time format loaded: %d\n", timeFormatPreference);
   } else {
     timeFormatPreference = 1;
-    if (Firebase.RTDB.setInt(&fbdo, timeFmtPath.c_str(), timeFormatPreference)) {
-      Serial.println("🕒 Default time format set to 12hr (1)");
-    } else {
-      Serial.printf("❌ Failed to set default time format: %s\n", fbdo.errorReason().c_str());
-    }
+    Firebase.RTDB.setInt(&fbdo, timeFmtPath.c_str(), timeFormatPreference);
+    Serial.println("🕒 Default time format set to 12hr (1)");
   }
 
   int brightness = 7;
@@ -212,30 +219,14 @@ void registerDeviceInFirebase() {
     Firebase.RTDB.setInt(&fbdo, brightnessPath.c_str(), brightness);
     Serial.println("⚠️ Brightness fallback set to 7");
   }
-
   brightnessLevel = constrain(brightness, 1, 10);
 
-  HTTPClient geoHttp;
-  geoHttp.begin("http://ip-api.com/json");
-  int code = geoHttp.GET();
-  if (code == 200) {
-    String payload = geoHttp.getString();
-    DynamicJsonDocument geoDoc(1024);
-    deserializeJson(geoDoc, payload);
-    storedLat = geoDoc["lat"];
-    storedLon = geoDoc["lon"];
-    String city = geoDoc["city"];
-    String region = geoDoc["region"];
-
-    Firebase.RTDB.setString(&fbdo, (settingsPath + "/weatherLocation").c_str(), city + "," + region);
-    Firebase.RTDB.setFloat(&fbdo, (settingsPath + "/lat").c_str(), storedLat);
-    Firebase.RTDB.setFloat(&fbdo, (settingsPath + "/lon").c_str(), storedLon);
-    fetchAndStoreTimezone(storedLat, storedLon);
-  } else {
-    Serial.println("❌ GeoIP failed: " + geoHttp.errorToString(code));
+  if (deferGeo) {
+    Serial.println("🌐 Skipping GeoIP and Timezone for now — deferGeo = true");
+    return;
   }
-  geoHttp.end();
 
+  updateGeoLocationAndTimezone(settingsPath);
   Serial.println("📍 Settings initialized or updated.");
 }
 
