@@ -12,7 +12,6 @@ public:
   String getAppId() override { return "forecast"; }
 
 private:
-  int scrollX = 64;
   bool needsRedraw = true;
   unsigned long startTime = 0;
 };

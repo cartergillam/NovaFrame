@@ -13,8 +13,7 @@ public:
   String getAppId() override { return "clock"; }
 
 private:
-  String lastDisplayedTime = "";
-  int lastMinute = -1;
-  bool isUpdating = false;
+  String lastRenderedKey = "";
+  int lastSecond = -1;
   bool needsRedraw = true;
 };

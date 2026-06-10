@@ -8,3 +8,6 @@ Supports animated clock/weather apps, Firebase integration, and OTA updates via 
 - Firebase-based app control
 - OTA firmware updates
 - Custom app framework
+- Shared stock cache pipeline for multi-device stock quotes/trendlines
+  - Cloudflare cron worker (recommended)
+  - Local Python worker fallback

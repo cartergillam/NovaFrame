@@ -10,14 +10,21 @@ public:
   void loop();          // Handle app switching and rendering
 
   BaseApp* getActiveApp();  // Get the currently active app
+  String getActiveAppId() const;
 
 private:
-  void nextApp();                   // Advance to next app in sequence
-  void loadApp(const String& appId); // Load app by ID
+  void applyConfigChanges(uint32_t changeFlags);
+  void nextApp();
+  void loadApp(const String& appId);
+  void rebuildRuntimeApps(bool forceReload);
+  bool shouldSleep() const;
+  void blankDisplay();
 
-  std::vector<String> enabledApps;  // App IDs from Firebase
+  std::vector<String> runtimeApps;
   int currentIndex = 0;
   unsigned long lastSwitchTime = 0;
-  const unsigned long appDuration = 10000; // 10 seconds per app
+  unsigned long currentDurationMs = 10000;
   BaseApp* currentApp = nullptr;
+  String currentAppId = "";
+  bool sleeping = false;
 };

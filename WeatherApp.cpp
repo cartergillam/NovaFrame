@@ -14,9 +14,9 @@ void WeatherApp::loop() {
 void WeatherApp::redraw(bool force, int xOffset) {
   if (!force && !getNeedsRedraw()) return;
 
-  // Weather data from cache
   String temp = weatherData.temp;
   String city = weatherData.city;
+  matrix.fillScreen(0);
 
   matrix.setTextSize(2);
   matrix.setTextColor(getScaledColor(255, 255, 255));
@@ -35,7 +35,6 @@ void WeatherApp::redraw(bool force, int xOffset) {
   matrix.print(city);
 
   matrix.setTextSize(2);  // Reset
-  matrix.show();
   setNeedsRedraw(false);
 }
 

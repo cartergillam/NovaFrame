@@ -18,15 +18,16 @@ extern WiFiManager wm;
 extern String deviceID;
 
 extern String units;              // "metric" or "imperial"
-extern int timeFormatPreference; // 0 = 12h + AM/PM, 1 = 12h no suffix, 2 = 24h
+extern int timeFormatPreference; // 0 = 12h, 1 = 12h + AM/PM, 2 = 24h
 extern float storedLat;
 extern float storedLon;
+extern String deviceTimezone;
 
 void initializeWiFi();
 void initializeFirebase();
-void registerDeviceInFirebase(bool deferGeo); 
-void updateGeoLocationAndTimezone(const String& settingsPath); 
+void registerDeviceInFirebase(bool allowLocationLookup);
+void updateGeoLocationAndTimezone(const String& settingsPath);
 bool loadSecretsFromFlash();
 String getSanitizedMac();
 void fetchAndStoreTimezone(float lat, float lon);
-String getDeviceID(); 
+String getDeviceID();

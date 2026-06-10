@@ -1,0 +1,26 @@
+{
+  "rules": {
+    "novaFrame": {
+      ".read": "(auth != null) && ((auth.uid == 'OoljdCs9CmaDsSOjCOcozEU6fT52') || (auth.uid == 'NEW_IOS_UID'))",
+      ".write": "(auth != null) && ((auth.uid == 'OoljdCs9CmaDsSOjCOcozEU6fT52') || (auth.uid == 'NEW_IOS_UID'))",
+      "apps": {
+        ".read": "auth != null",
+        ".write": "(auth != null) && ((auth.uid == 'OoljdCs9CmaDsSOjCOcozEU6fT52') || (auth.uid == 'NEW_IOS_UID'))"
+      },
+      "devices": {
+        "$deviceID": {
+          ".read": "auth != null",
+          ".write": "(auth != null) && ((auth.uid == 'OoljdCs9CmaDsSOjCOcozEU6fT52') || (auth.uid == 'NEW_IOS_UID'))"
+        }
+      },
+      "remoteConfig": {
+        ".read": "(auth != null) && ((auth.uid == 'OoljdCs9CmaDsSOjCOcozEU6fT52') || (auth.uid == 'NEW_IOS_UID'))",
+        ".write": "(auth != null) && ((auth.uid == 'OoljdCs9CmaDsSOjCOcozEU6fT52') || (auth.uid == 'NEW_IOS_UID'))"
+      },
+      "cache": {
+        ".read": "auth != null",
+        ".write": false
+      }
+    }
+  }
+}

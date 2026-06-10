@@ -14,6 +14,9 @@
 #include "OTAUpdater.h"
 #include "RemoteConfigManager.h"
 #include "ForecastApp.h"
+#include "StocksApp.h"
+#include "SportsApp.h"
+#include "esp_system.h"
 
 #define BUTTON_PIN A1
 #define HOLD_TIME 2000
@@ -24,6 +27,11 @@ ClockWeatherApp clockWeatherApp;
 WeatherApp weatherApp;
 TimeCache timeCache;
 ForecastApp forecastApp;
+StocksApp stocksApp;
+SportsApp mlbApp("mlb", "MLB");
+SportsApp nbaApp("nba", "NBA");
+SportsApp nflApp("nfl", "NFL");
+SportsApp nhlApp("nhl", "NHL");
 
 std::map<String, BaseApp*> appRegistry;
 
@@ -33,11 +41,28 @@ bool buttonHeld = false;
 bool isUpdating = false;
 unsigned long lastOTACheck = 0;
 const unsigned long OTA_INTERVAL = 60 * 60 * 1000;
-static bool geoUpdated = false;
+
+const char* resetReasonToString(esp_reset_reason_t reason) {
+  switch (reason) {
+    case ESP_RST_POWERON: return "POWERON";
+    case ESP_RST_EXT: return "EXT";
+    case ESP_RST_SW: return "SW";
+    case ESP_RST_PANIC: return "PANIC";
+    case ESP_RST_INT_WDT: return "INT_WDT";
+    case ESP_RST_TASK_WDT: return "TASK_WDT";
+    case ESP_RST_WDT: return "WDT";
+    case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
+    case ESP_RST_BROWNOUT: return "BROWNOUT";
+    case ESP_RST_SDIO: return "SDIO";
+    default: return "UNKNOWN";
+  }
+}
 
 void setup() {
   Serial.begin(115200);
   delay(150);
+  esp_reset_reason_t resetReason = esp_reset_reason();
+  Serial.printf("🔁 Reset reason: %s (%d)\n", resetReasonToString(resetReason), static_cast<int>(resetReason));
 
   Wire.begin();
   pinMode(LED_BUILTIN, OUTPUT);
@@ -52,18 +77,19 @@ void setup() {
   // 🌐 Connect to Firebase
   initializeFirebase();
 
-  // 📱 Register device (but defer geo/timezone fetch to later)
-  registerDeviceInFirebase(false);
+  // 📱 Register device and seed/migrate per-device config.
+  registerDeviceInFirebase(true);
 
   // 📦 Initialize app registry
   appRegistry["clock"] = &clockApp;
   appRegistry["clockWeather"] = &clockWeatherApp;
   appRegistry["weather"] = &weatherApp;
   appRegistry["forecast"] = &forecastApp;
-
-  // 🔄 Load initial settings & cache
-  updateWeatherCache();         // Safe now — we have Wi-Fi and Firebase
-  timeCache.init();             // Uses stored lat/lon, skips if not available
+  appRegistry["stocks"] = &stocksApp;
+  appRegistry["mlb"] = &mlbApp;
+  appRegistry["nba"] = &nbaApp;
+  appRegistry["nfl"] = &nflApp;
+  appRegistry["nhl"] = &nhlApp;
 
   showWifiInfo();
   delay(2000);
@@ -81,7 +107,6 @@ void setup() {
 
   // 🚀 Start app rotation
   appManager.init();
-  matrix.show();
 }
 
 void loop() {
@@ -99,7 +124,6 @@ void loop() {
       showCenteredText("Reset WiFi", 12, matrix.color565(255, 0, 0));
       matrix.show();
       wm.resetSettings();
-      geoUpdated = false;
       delay(1000);
       ESP.restart();
     }
@@ -108,45 +132,11 @@ void loop() {
     buttonHeld = false;
   }
 
-  static unsigned long lastGlobalBrightnessCheck = 0;
-  if (now - lastGlobalBrightnessCheck > 5000) {
-    int prevLevel = brightnessLevel;
-    int prevTimeFormat = timeFormatPreference;
-    String prevUnits = getUnits();  // Ensure getter exists
-
-    checkBrightnessUpdate();
-    checkTimeFormatUpdate();
-    checkUnitsUpdate();
-
-    BaseApp* current = appManager.getActiveApp();
-    if (current && (
-          brightnessLevel != prevLevel ||
-          timeFormatPreference != prevTimeFormat ||
-          getUnits() != prevUnits)) {
-      current->setNeedsRedraw(true);
-    }
-
-    lastGlobalBrightnessCheck = now;
-  }
-
-  BaseApp* current = appManager.getActiveApp();
-  if (current) {
-    appManager.loop();
-
-    if (current->getNeedsRedraw()) {
-      current->redraw(true);
-      current->setNeedsRedraw(false);
-    }
-  }
+  appManager.loop();
 
   delay(100);
   if (millis() - lastOTACheck > OTA_INTERVAL) {
     checkForOTAUpdate();
     lastOTACheck = millis();
-  }
-  if (!geoUpdated && millis() > 15000 && Firebase.ready()) {
-    Serial.println("🌎 Updating geo + timezone after startup...");
-    updateGeoLocationAndTimezone("/novaFrame/devices/" + getDeviceID() + "/settings");
-    geoUpdated = true;
   }
 }

@@ -1,135 +1,143 @@
 #include "AppManager.h"
-#include "FirebaseHelper.h"
 #include <Firebase_ESP_Client.h>
 #include "DeviceRegistration.h"
+#include "DeviceConfig.h"
+#include "DisplayHelpers.h"
 #include "TimeCache.h"
+#include "WeatherCache.h"
+#include <algorithm>
 #include <map>
 #include <vector>
-#include <ArduinoJson.h>
 
 extern FirebaseData fbdo;
 extern FirebaseAuth auth;
 extern FirebaseConfig config;
 extern std::map<String, BaseApp*> appRegistry;
-extern String deviceID;
 extern TimeCache timeCache;
 extern AppManager appManager;
+extern int brightnessLevel;
+extern unsigned long lastWeatherFetchTime;
+
+namespace {
+
+const char* kCanonicalRuntimeOrder[] = {
+  "clockWeather", "forecast", "stocks", "mlb", "nba", "nfl", "nhl", "clock", "weather"
+};
+
+}
 
 void AppManager::init() {
-  std::vector<String> loadedApps;
-  if (!getEnabledAppsFromFirebase(loadedApps, true)) {
-    Serial.println("❌ Could not load enabled apps. Using fallback.");
-    loadedApps.push_back("clock");
-  }
-
-  std::vector<String> validApps;
-  for (const auto& app : loadedApps) {
-    if (app.length() > 0 && appRegistry.count(app)) {
-      validApps.push_back(app);
-    } else {
-      Serial.println("⚠️ Skipping invalid app ID: " + app);
-    }
-  }
-
-  if (validApps.empty()) {
-    validApps.push_back("clock");
-    Serial.println("⚠️ No valid apps. Using fallback: clock");
-  }
-
-  std::vector<String> currentSequence;
-  fetchAppSequenceFromFirebase(currentSequence, true);
-
-  if (currentSequence != validApps) {
-    Serial.println("🔁 Detected mismatch or missing appSequence. Updating Firebase...");
-    setAppSequenceToFirebase(validApps);
-  }
-
-  enabledApps = validApps;
-  currentIndex = 0;
-  loadApp(enabledApps[currentIndex]);
+  refreshDeviceConfig(true);
+  maybeAutoUpdateLocationFromGeo(true);
+  brightnessLevel = deviceSettings.brightness;
+  updateWeatherCache();
+  timeCache.init();
+  rebuildRuntimeApps(true);
+  takeDeviceConfigChangeFlags();
   lastSwitchTime = millis();
 }
 
 void AppManager::loop() {
   unsigned long now = millis();
 
-  if (enabledApps.size() >= 2 && now - lastSwitchTime >= appDuration) {
+  pollDeviceConfigStreams();
+  maybeAutoUpdateLocationFromGeo(false);
+  applyConfigChanges(takeDeviceConfigChangeFlags());
+  updateWeatherCache();
+  timeCache.updateIfNeeded();
+
+  bool shouldSleepNow = shouldSleep();
+  if (shouldSleepNow != sleeping) {
+    sleeping = shouldSleepNow;
+    if (sleeping) {
+      blankDisplay();
+    } else if (currentApp) {
+      currentApp->setNeedsRedraw(true);
+    }
+  }
+
+  if (sleeping) {
+    writeDeviceStatus(currentAppId, true, timeCache.getCurrentUnixTime(), timeCache.isSynchronized());
+    return;
+  }
+
+  if (runtimeApps.size() >= 2 && now - lastSwitchTime >= currentDurationMs) {
     Serial.println("⏭️ Switching to next app...");
     nextApp();
     lastSwitchTime = now;
   }
 
   if (currentApp) {
-    timeCache.updateIfNeeded();
     currentApp->loop();
 
     if (currentApp->getNeedsRedraw()) {
       currentApp->redraw(true);
       currentApp->setNeedsRedraw(false);
+      matrix.show();
     }
   } else {
     Serial.println("❌ currentApp is NULL");
   }
+  writeDeviceStatus(currentAppId, false, timeCache.getCurrentUnixTime(), timeCache.isSynchronized());
+}
 
-  static unsigned long lastPoll = 0;
-  static unsigned long pollInterval = 30000;  // Start at 30 seconds
-  static int failureCount = 0;
-  const unsigned long maxPollInterval = 5 * 60 * 1000;  // Cap at 5 mins
+void AppManager::applyConfigChanges(uint32_t changeFlags) {
+  if (changeFlags == DeviceConfigChangeNone) {
+    return;
+  }
 
-  if (now - lastPoll >= pollInterval) {
-    lastPoll = now;
+  bool needsRedraw = false;
 
-    if (!Firebase.ready()) {
-      Serial.println("⚠️ Firebase not ready. Skipping poll cycle.");
-      failureCount++;
-      pollInterval = min(pollInterval * 2, maxPollInterval);
-      return;
-    }
+  if (changeFlags & DeviceConfigChangeBrightness) {
+    int previousBrightness = brightnessLevel;
+    brightnessLevel = deviceSettings.brightness;
+    Serial.printf("🔆 Brightness update: %d -> %d\n", previousBrightness, brightnessLevel);
+    needsRedraw = true;
+  }
 
-    std::vector<String> updatedApps;
-    if (getEnabledAppsFromFirebase(updatedApps, true)) {
-      failureCount = 0;
-      pollInterval = 30000;  // Reset interval on success
+  if (changeFlags & DeviceConfigChangeTimeFormat) {
+    needsRedraw = true;
+  }
 
-      std::vector<String> validApps;
-      for (const auto& app : updatedApps) {
-        if (app.length() > 0 && appRegistry.count(app)) {
-          validApps.push_back(app);
-        } else {
-          Serial.println("⚠️ Skipping unregistered or empty app ID: " + app);
-        }
-      }
+  if (changeFlags & DeviceConfigChangeUnits) {
+    lastWeatherFetchTime = 0;
+    updateWeatherCache();
+    needsRedraw = true;
+  }
 
-      if (validApps != enabledApps) {
-        Serial.println("🔁 Firebase appSequence changed. Reloading apps.");
-        enabledApps = validApps;
+  if (changeFlags & DeviceConfigChangeLocation) {
+    lastWeatherFetchTime = 0;
+    timeCache.init();
+    updateWeatherCache();
+    needsRedraw = true;
+  }
 
-        if (enabledApps.empty()) {
-          enabledApps.push_back("clock");
-          Serial.println("⚠️ No valid apps after update. Using fallback: clock.");
-        }
+  if (changeFlags & DeviceConfigChangeSleepSchedule) {
+    needsRedraw = true;
+  }
 
-        currentIndex = 0;
-        loadApp(enabledApps[currentIndex]);
-        lastSwitchTime = now;
-        if (!Firebase.ready()) {
-          Serial.println("⚠️ Firebase not ready. Skipping app sequence update.");
-          return;
-        }
-        setAppSequenceToFirebase(enabledApps);
-      }
-    } else {
-      failureCount++;
-      pollInterval = min(pollInterval * 2, maxPollInterval);  // Backoff
-      Serial.println("❌ Failed to fetch appSequence from Firebase");
-    }
+  if (changeFlags & (DeviceConfigChangeSequence | DeviceConfigChangeAppState)) {
+    rebuildRuntimeApps(false);
+  }
+
+  if ((changeFlags & DeviceConfigChangeStocks) && currentAppId == "stocks") {
+    needsRedraw = true;
+  }
+
+  if ((changeFlags & DeviceConfigChangeSports) &&
+      (currentAppId == "mlb" || currentAppId == "nba" || currentAppId == "nfl" || currentAppId == "nhl")) {
+    needsRedraw = true;
+  }
+
+  if (needsRedraw && currentApp != nullptr) {
+    currentApp->setNeedsRedraw(true);
   }
 }
 
 void AppManager::nextApp() {
-  if (enabledApps.empty()) return;
-  currentIndex = (currentIndex + 1) % enabledApps.size();
-  loadApp(enabledApps[currentIndex]);
+  if (runtimeApps.empty()) return;
+  currentIndex = (currentIndex + 1) % runtimeApps.size();
+  loadApp(runtimeApps[currentIndex]);
 }
 
 void AppManager::loadApp(const String& appId) {
@@ -140,12 +148,12 @@ void AppManager::loadApp(const String& appId) {
 
   if (appRegistry.count(appId)) {
     matrix.fillScreen(0);
-    matrix.show();
 
     currentApp = appRegistry[appId];
+    currentAppId = appId;
+    currentDurationMs = getAppDurationMs(appId);
     currentApp->init();
     currentApp->setNeedsRedraw(true);
-    currentApp->redraw(true);
 
     Serial.println("✅ App loaded and redrawn: " + appId);
   } else {
@@ -156,6 +164,84 @@ void AppManager::loadApp(const String& appId) {
 
 BaseApp* AppManager::getActiveApp() {
   return currentApp;
+}
+
+String AppManager::getActiveAppId() const {
+  return currentAppId;
+}
+
+void AppManager::rebuildRuntimeApps(bool forceReload) {
+  std::vector<String> nextApps;
+
+  for (const auto& appId : deviceSettings.appSequence) {
+    if (appId.length() == 0) continue;
+    if (!appRegistry.count(appId)) {
+      Serial.println("⚠️ Skipping unregistered app in sequence: " + appId);
+      continue;
+    }
+    if (!isAppEnabled(appId)) continue;
+    if (std::find(nextApps.begin(), nextApps.end(), appId) == nextApps.end()) {
+      nextApps.push_back(appId);
+    }
+  }
+
+  for (const char* rawId : kCanonicalRuntimeOrder) {
+    String appId(rawId);
+    if (!appRegistry.count(appId)) continue;
+    if (!isAppEnabled(appId)) continue;
+    if (std::find(nextApps.begin(), nextApps.end(), appId) == nextApps.end()) {
+      nextApps.push_back(appId);
+    }
+  }
+
+  for (const auto& entry : deviceAppConfigs) {
+    if (!appRegistry.count(entry.first)) continue;
+    if (!entry.second.enabled) continue;
+    if (std::find(nextApps.begin(), nextApps.end(), entry.first) == nextApps.end()) {
+      nextApps.push_back(entry.first);
+    }
+  }
+
+  if (nextApps.empty()) {
+    if (appRegistry.count("clockWeather")) {
+      nextApps.push_back("clockWeather");
+    } else if (appRegistry.count("clock")) {
+      nextApps.push_back("clock");
+    }
+  }
+
+  if (nextApps.empty()) return;
+
+  bool sequenceChanged = nextApps != runtimeApps;
+  runtimeApps = nextApps;
+
+  auto activeIt = std::find(runtimeApps.begin(), runtimeApps.end(), currentAppId);
+  bool activeStillPresent = activeIt != runtimeApps.end();
+  if (!activeStillPresent) {
+    currentIndex = 0;
+    loadApp(runtimeApps[currentIndex]);
+    lastSwitchTime = millis();
+    return;
+  }
+
+  currentIndex = static_cast<int>(std::distance(runtimeApps.begin(), activeIt));
+  unsigned long nextDuration = getAppDurationMs(currentAppId);
+  bool durationChanged = nextDuration != currentDurationMs;
+  currentDurationMs = nextDuration;
+
+  if (forceReload || sequenceChanged || durationChanged) {
+    if (currentApp != nullptr) currentApp->setNeedsRedraw(true);
+  }
+}
+
+bool AppManager::shouldSleep() const {
+  if (!timeCache.isSynchronized()) return false;
+  return shouldSleepNow(timeCache.getWeekdayIndex(), timeCache.getMinutesSinceMidnight());
+}
+
+void AppManager::blankDisplay() {
+  matrix.fillScreen(0);
+  matrix.show();
 }
 
 // Global helper that delegates to the AppManager instance

@@ -3,11 +3,17 @@
 #include <Arduino.h>
 #include <Adafruit_Protomatter.h>
 
-// 8x8 monochrome bitmaps for basic weather icons
-extern const uint8_t bitmap_sun_large[32];
-extern const uint8_t bitmap_cloud_large[128];
-extern const uint8_t bitmap_moon_large[32];
-extern const uint8_t bitmap_rain_large[32];
+// Masks
+extern const uint8_t bitmap_cloud[];
+extern const uint8_t bitmap_sun[72];
+extern const uint8_t bitmap_partial_sun[];
+extern const uint8_t bitmap_few_clouds[];
+extern const uint8_t bitmap_broken_clouds[];
+extern const uint8_t bitmap_broken_clouds_black[];
+extern const uint8_t bitmap_rain[];
+extern const uint8_t bitmap_lightning[];
+extern const uint8_t bitmap_snow[];
+extern const uint8_t bitmap_mist[];
 
 // Returns a color for the icon based on the OpenWeatherMap icon code, with brightness scaling
 uint16_t getIconColor(const String& iconCode);

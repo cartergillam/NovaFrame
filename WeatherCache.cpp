@@ -4,6 +4,7 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include "DeviceRegistration.h"
+#include "DeviceConfig.h"
 #include "RemoteConfigManager.h"
 #include "AppManager.h"
 
@@ -17,12 +18,28 @@ extern AppManager appManager;
 
 WeatherData weatherData;
 unsigned long lastWeatherFetchTime = 0;
-const unsigned long WEATHER_CACHE_INTERVAL = 60UL * 60UL * 1000UL; // 1 hour
+unsigned long lastWeatherAttemptTime = 0;
+
+namespace {
+
+constexpr unsigned long kWeatherFailureRetryMs = 5UL * 60UL * 1000UL;
+
+unsigned long weatherCacheIntervalMs() {
+  return isAppEnabled("clockWeather")
+    ? 20UL * 60UL * 1000UL
+    : 60UL * 60UL * 1000UL;
+}
+
+}
 
 void updateWeatherCache() {
   unsigned long now = millis();
+  weatherData.city = deviceSettings.locationLabel;
 
-  if (now - lastWeatherFetchTime < WEATHER_CACHE_INTERVAL && lastWeatherFetchTime != 0) {
+  if (lastWeatherFetchTime != 0 && now - lastWeatherFetchTime < weatherCacheIntervalMs()) {
+    return;
+  }
+  if (lastWeatherFetchTime == 0 && lastWeatherAttemptTime != 0 && now - lastWeatherAttemptTime < kWeatherFailureRetryMs) {
     return;
   }
 
@@ -50,6 +67,7 @@ void updateWeatherCache() {
 
   HTTPClient http;
   http.begin(query);
+  lastWeatherAttemptTime = now;
   int code = http.GET();
 
   if (code == 200) {
@@ -61,8 +79,11 @@ void updateWeatherCache() {
     if (err) {
       Serial.print("❌ JSON parse error: ");
       Serial.println(err.c_str());
+      http.end();
       return;
     }
+
+    long timezoneOffset = doc["timezone_offset"] | 0L;
 
     // Current weather
     weatherData.temp      = String((int)round(doc["current"]["temp"].as<float>()));
@@ -89,23 +110,29 @@ void updateWeatherCache() {
     Serial.println("🔮 icon2 (tomorrow): " + weatherData.icon2);
 
     // Day names
-    time_t todayDT = today["dt"].as<time_t>();
-    time_t tomorrowDT = tomorrow["dt"].as<time_t>();
+    time_t todayDT = today["dt"].as<time_t>() + timezoneOffset;
+    time_t tomorrowDT = tomorrow["dt"].as<time_t>() + timezoneOffset;
     char buf[4];
 
-    strftime(buf, sizeof(buf), "%a", localtime(&todayDT));
-    weatherData.forecastDay1 = String(buf);
+    tm* todayTm = gmtime(&todayDT);
+    if (todayTm != nullptr) {
+      strftime(buf, sizeof(buf), "%a", todayTm);
+      weatherData.forecastDay1 = String(buf);
+    }
 
-    strftime(buf, sizeof(buf), "%a", localtime(&tomorrowDT));
-    weatherData.forecastDay2 = String(buf);
+    tm* tomorrowTm = gmtime(&tomorrowDT);
+    if (tomorrowTm != nullptr) {
+      strftime(buf, sizeof(buf), "%a", tomorrowTm);
+      weatherData.forecastDay2 = String(buf);
+    }
 
     lastWeatherFetchTime = now;
+    lastWeatherAttemptTime = now;
     Serial.println("✅ Weather cache updated (One Call)");
     Serial.println("🌡️ Temp now: " + weatherData.temp);
 
-    // 🔁 Force ForecastApp to redraw if it's currently showing
     BaseApp* activeApp = getActiveApp();
-    if (activeApp != nullptr && activeApp->getAppId() == "forecast") {
+    if (activeApp != nullptr) {
       activeApp->setNeedsRedraw(true);
     }
 

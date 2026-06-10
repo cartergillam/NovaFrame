@@ -15,5 +15,5 @@ public:
 
 private:
     bool needsRedraw = true;
-    int getCharWidth(char c);
+    String lastRenderedKey = "";
 };

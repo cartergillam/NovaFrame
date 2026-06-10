@@ -1,5 +1,6 @@
 #include "DisplayHelpers.h"
 #include "DeviceRegistration.h"
+#include "DeviceConfig.h"
 #include "BaseApp.h"
 #include "AppManager.h"
 
@@ -51,7 +52,6 @@ void showCenteredText(const char* text, int y, uint16_t color, int size, int xOf
   int16_t x = (PANEL_WIDTH - w) / 2 + xOffset;
   matrix.setCursor(x, y);
   matrix.print(text);
-  matrix.show();  // ✅ Ensure it actually appears
 }
 
 void scrollText(const char* text, int y, uint16_t color, int delayMs) {
@@ -135,44 +135,29 @@ uint16_t getScaledColor(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 void checkBrightnessUpdate() {
-  String path = "/novaFrame/devices/" + getSanitizedMac() + "/settings/brightness";
-  if (Firebase.RTDB.getInt(&fbdo, path.c_str())) {
-    int newVal = constrain(fbdo.intData(), 1, 10);
-    if (newVal != brightnessLevel) {
-      brightnessLevel = newVal;
-      Serial.printf("Brightness updated to %d\n", brightnessLevel);
-    }
-  }
+  brightnessLevel = deviceSettings.brightness;
 }
 
 void checkTimeFormatUpdate() {
-  String path = "/novaFrame/devices/" + getSanitizedMac() + "/settings/timeFormat";
-  if (Firebase.RTDB.getInt(&fbdo, path.c_str())) {
-    int newVal = fbdo.intData();
-    if (newVal != timeFormatPreference) {
-      timeFormatPreference = newVal;
-      Serial.printf("🔄 Time format updated to: %d\n", timeFormatPreference);
-      BaseApp* current = appManager.getActiveApp();
-      if (current) {
-        current->setNeedsRedraw(true);
-      }
+  int previous = timeFormatPreference;
+  timeFormatPreference = deviceSettings.timeFormat;
+  if (previous != timeFormatPreference) {
+    BaseApp* current = appManager.getActiveApp();
+    if (current) {
+      current->setNeedsRedraw(true);
     }
   }
 }
 
 void checkUnitsUpdate() {
-  String path = "/novaFrame/devices/" + getSanitizedMac() + "/settings/units";
-  if (Firebase.RTDB.getString(&fbdo, path.c_str())) {
-    String newVal = fbdo.stringData();
-    if (newVal != units) {
-      units = newVal;
-      Serial.println("🔄 Units updated to: " + units);
-      lastWeatherFetchTime = 0;
-      updateWeatherCache();
-      BaseApp* current = appManager.getActiveApp();
-      if (current) {
-        current->setNeedsRedraw(true);
-      }
+  String previous = units;
+  units = deviceSettings.units;
+  if (previous != units) {
+    lastWeatherFetchTime = 0;
+    updateWeatherCache();
+    BaseApp* current = appManager.getActiveApp();
+    if (current) {
+      current->setNeedsRedraw(true);
     }
   }
 }
@@ -189,7 +174,6 @@ void drawCenteredText(const String& text, int x, int y) {
   matrix.setCursor(xPos, y);
   matrix.setTextColor(getScaledColor(255, 255, 255));
   matrix.print(text);
-  matrix.show();
 }
 
 void drawSmallText(const String& text, int x, int y) {
@@ -198,6 +182,4 @@ void drawSmallText(const String& text, int x, int y) {
   matrix.setCursor(x, y);
   matrix.setTextColor(getScaledColor(192, 192, 192));
   matrix.print(text);
-  matrix.show();
 }
-

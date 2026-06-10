@@ -1,0 +1,8 @@
+name = "novaframe-stocks-cache"
+main = "src/index.js"
+compatibility_date = "2026-05-28"
+workers_dev = true
+
+[triggers]
+crons = ["* * * * *"]
+

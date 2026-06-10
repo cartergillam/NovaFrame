@@ -29,7 +29,7 @@ void RemoteConfigManager::begin() {
 
   for (JsonPair kv : doc.as<JsonObject>()) {
     configMap[kv.key().c_str()] = kv.value().as<String>();
-    Serial.printf("🔧 Config key: %s = %s\n", kv.key().c_str(), kv.value().as<String>().c_str());
+    Serial.printf("🔧 Config key loaded: %s\n", kv.key().c_str());
   }
 
   fetched = true;

@@ -2,3 +2,43 @@ secrets.h
 *.pem
 *.key
 *.der
+.env
+service-account.json
+service-account*.json
+*.service-account.json
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Node (if used later)
+node_modules/
+.wrangler/
+
+# Arduino / build artifacts
+build/
+dist/
+sports_logos/generated/
+*.o
+*.a
+*.so
+*.elf
+*.bin
+*.map
+*.hex
+*.lst
+*.dSYM/
+
+# Logs / temp
+*.log
+tmp/
+*.tmp
