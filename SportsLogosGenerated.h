@@ -14,6 +14,7 @@ struct SportsLogoDef {
   const char* team;
   uint8_t width;
   uint8_t height;
+  uint8_t rowSize;
   uint8_t layerCount;
   const SportsLogoLayerDef* layers;
 };

@@ -13,6 +13,7 @@ struct AppConfig {
   bool enabled = false;
   unsigned long durationMs = 10000;
   String valueMode = "dollar";
+  String sportsDisplayStyle = "colorBar";
   unsigned long symbolDurationMs = 5000;
   std::vector<String> symbols;
   std::vector<TeamFavorite> favorites;

@@ -32,7 +32,7 @@ FirebaseData configFbdo;
 FirebaseData deviceStreamFbdo;
 FirebaseData statusFbdo;
 
-constexpr int kSchemaVersion = 5;
+constexpr int kSchemaVersion = 6;
 constexpr size_t kDayCount = 7;
 constexpr unsigned long kConfigStreamRetryMs = 5000;
 constexpr unsigned long kAutoLocationIntervalMs = 6UL * 60UL * 60UL * 1000UL;
@@ -290,6 +290,13 @@ bool favoritesEqual(const std::vector<TeamFavorite>& left, const std::vector<Tea
     }
   }
   return true;
+}
+
+String normalizeSportsDisplayStyle(const String& rawStyle) {
+  String style = rawStyle;
+  style.trim();
+  style.toLowerCase();
+  return style == "nobar" ? "noBar" : "colorBar";
 }
 
 bool dayScheduleEqual(const DaySleepSchedule& left, const DaySleepSchedule& right) {
@@ -746,6 +753,7 @@ void seedAppIfMissing(const AppSeed& seed) {
     json.set("symbolDurationMs", 5000);
     setDefaultSymbols(json);
   } else if (isSportsAppId(String(seed.id))) {
+    json.set("displayStyle", "colorBar");
     setDefaultFavorites(json);
   }
   Firebase.RTDB.setJSON(&configFbdo, getDeviceAppPath(seed.id).c_str(), &json);
@@ -1011,6 +1019,27 @@ void migrateLegacySportsConfig() {
   Firebase.RTDB.deleteNode(&configFbdo, legacyPath.c_str());
 }
 
+void migrateSportsDisplayStyles() {
+  const char* leagues[] = {"mlb", "nba", "nfl", "nhl"};
+  for (const char* rawLeague : leagues) {
+    String path = getDeviceAppPath(String(rawLeague));
+    if (!Firebase.RTDB.getJSON(&configFbdo, path.c_str())) {
+      continue;
+    }
+
+    String jsonStr;
+    configFbdo.jsonObject().toString(jsonStr, true);
+    StaticJsonDocument<2048> doc;
+    if (deserializeJson(doc, jsonStr)) {
+      continue;
+    }
+
+    if (!doc.containsKey("displayStyle")) {
+      Firebase.RTDB.setString(&configFbdo, (path + "/displayStyle").c_str(), "colorBar");
+    }
+  }
+}
+
 void migratePerAppDurations() {
   if (!Firebase.RTDB.getJSON(&configFbdo, (deviceRoot() + "/apps").c_str())) {
     return;
@@ -1259,8 +1288,11 @@ uint32_t diffApps(const std::map<String, AppConfig>& previous, const std::map<St
         flags |= DeviceConfigChangeStocks;
       }
     }
-    if (isSportsAppId(key) && !favoritesEqual(prevConfig.favorites, nextConfig.favorites)) {
-      flags |= DeviceConfigChangeSports;
+    if (isSportsAppId(key)) {
+      if (!favoritesEqual(prevConfig.favorites, nextConfig.favorites) ||
+          prevConfig.sportsDisplayStyle != nextConfig.sportsDisplayStyle) {
+        flags |= DeviceConfigChangeSports;
+      }
     }
   }
 
@@ -1289,9 +1321,11 @@ bool initializeDeviceConfig(bool allowLocationLookup) {
     migrateCoreSettings();
     migrateLegacyStockConfig();
     migratePerAppDurations();
+    migrateSportsDisplayStyles();
   }
   seedCanonicalApps();
   migrateLegacySportsConfig();
+  migrateSportsDisplayStyles();
   seedSleepScheduleIfMissing();
   migrateLocationSettings(allowLocationLookup);
 
@@ -1386,6 +1420,9 @@ bool refreshDeviceConfig(bool forceRefresh) {
         config.symbolDurationMs = app["stockDurationMs"] | 5000UL;
       }
       config.symbolDurationMs = constrain(config.symbolDurationMs, 1500UL, 60000UL);
+    }
+    if (isSportsAppId(appId)) {
+      config.sportsDisplayStyle = normalizeSportsDisplayStyle(String(app["displayStyle"] | "colorBar"));
     }
     if (config.durationMs == 0UL) {
       config.durationMs = app["duration"] | 10000UL;
@@ -1654,6 +1691,17 @@ bool pollDeviceConfigStreams() {
             it->second.durationMs = nextDuration;
             pendingConfigChangeFlags |= DeviceConfigChangeAppState;
           }
+        }
+        return true;
+      }
+
+      if (isSportsAppId(appId) && field == "displayStyle") {
+        String nextStyle;
+        if (!parseStreamStringValue(deviceStreamFbdo, nextStyle)) return false;
+        nextStyle = normalizeSportsDisplayStyle(nextStyle);
+        if (nextStyle != it->second.sportsDisplayStyle) {
+          it->second.sportsDisplayStyle = nextStyle;
+          pendingConfigChangeFlags |= DeviceConfigChangeSports;
         }
         return true;
       }

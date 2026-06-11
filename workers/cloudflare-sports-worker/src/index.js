@@ -174,7 +174,7 @@ function eventRank(event) {
 }
 
 function eventSnapshot(league, teamId, candidate) {
-  const { event, teamCompetitor, opponent } = candidate;
+  const { event, competition, teamCompetitor, opponent } = candidate;
   const state = normalizeState(event?.status?.type?.state);
   const team = teamCompetitor?.team || {};
   const opp = opponent?.team || {};
@@ -202,8 +202,80 @@ function eventSnapshot(league, teamId, candidate) {
     teamColor: normalizeHexColor(team.color),
     opponentColor: normalizeHexColor(opp.color),
     gameTimeUtc: gameDate ? gameDate.toISOString() : "",
+    ...liveExtras(league, competition, teamCompetitor, opponent),
     updatedAt: Date.now(),
   };
+}
+
+function liveExtras(league, competition, teamCompetitor, opponent) {
+  const situation = competition?.situation || {};
+  if (league === "mlb") {
+    return {
+      hasBaseState: hasAnyKey(situation, ["onFirst", "onSecond", "onThird"]),
+      onFirst: Boolean(situation.onFirst),
+      onSecond: Boolean(situation.onSecond),
+      onThird: Boolean(situation.onThird),
+    };
+  }
+  if (league === "nhl") {
+    return {
+      hasPowerPlay: Boolean(situation.powerPlay || situation.isPowerPlay),
+    };
+  }
+  if (league === "nba") {
+    return {
+      teamTimeouts: timeoutFrom(teamCompetitor),
+      opponentTimeouts: timeoutFrom(opponent),
+      teamFouls: foulsFrom(teamCompetitor),
+      opponentFouls: foulsFrom(opponent),
+    };
+  }
+  if (league === "nfl") {
+    return {
+      liveExtra: nflDownDistance(situation),
+      possessionAbbr: normalizeTeamId(situation.possession || situation.possessionText || ""),
+      teamTimeouts: timeoutFrom(teamCompetitor),
+      opponentTimeouts: timeoutFrom(opponent),
+    };
+  }
+  return {};
+}
+
+function hasAnyKey(object, keys) {
+  return keys.some((key) => Object.prototype.hasOwnProperty.call(object || {}, key));
+}
+
+function timeoutFrom(competitor) {
+  return intFrom(competitor?.timeouts ?? competitor?.timeoutsRemaining ?? statValue(competitor, ["timeouts", "to"]));
+}
+
+function foulsFrom(competitor) {
+  return intFrom(competitor?.fouls ?? competitor?.teamFouls ?? statValue(competitor, ["fouls", "f"]));
+}
+
+function statValue(competitor, names) {
+  const stats = Array.isArray(competitor?.statistics) ? competitor.statistics : [];
+  for (const stat of stats) {
+    const name = String(stat?.name || "").toLowerCase();
+    const abbr = String(stat?.abbreviation || "").toLowerCase();
+    if (names.includes(name) || names.includes(abbr)) {
+      return stat?.value ?? stat?.displayValue;
+    }
+  }
+  return undefined;
+}
+
+function intFrom(value) {
+  if (value === undefined || value === null || value === "") return -1;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.trunc(parsed) : -1;
+}
+
+function nflDownDistance(situation) {
+  const direct = situation?.shortDownDistanceText || situation?.downDistanceText;
+  if (direct) return String(direct);
+  if (situation?.down && situation?.distance) return `${situation.down}&${situation.distance}`;
+  return "";
 }
 
 function noGameSnapshot(league, teamId) {

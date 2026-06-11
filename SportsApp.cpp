@@ -32,12 +32,30 @@ struct SportsSnapshot {
   String teamColor = "";
   String opponentColor = "";
   String gameTimeUtc = "";
+  String liveExtra = "";
+  String possessionAbbr = "";
+  bool baseOccupied[3] = {false, false, false};
+  bool hasBaseState = false;
+  bool hasPowerPlay = false;
+  bool hasPossession = false;
+  int teamTimeouts = -1;
+  int opponentTimeouts = -1;
+  int teamFouls = -1;
+  int opponentFouls = -1;
   unsigned long fetchedAt = 0;
 };
 
 std::map<String, SportsSnapshot> sportsSnapshots;
+std::map<String, unsigned long> sportsFetchRetryAfter;
 const unsigned long kRotateIntervalMs = 5000;
 const unsigned long kRefreshIntervalMs = 60000;
+const unsigned long kFetchFailureBackoffMs = 120000;
+
+struct Rgb {
+  uint8_t r;
+  uint8_t g;
+  uint8_t b;
+};
 
 struct LeagueEndpoint {
   const char* sport;
@@ -49,10 +67,6 @@ LeagueEndpoint endpointForLeague(const String& league) {
   if (league == "nba") return {"basketball", "nba"};
   if (league == "nfl") return {"football", "nfl"};
   return {"hockey", "nhl"};
-}
-
-String favoriteKey(const TeamFavorite& favorite) {
-  return favorite.league + ":" + favorite.teamId;
 }
 
 String variantToString(JsonVariant value, const String& defaultValue = "") {
@@ -76,6 +90,10 @@ String normalizedTeam(const String& team) {
   out.trim();
   out.toUpperCase();
   return out;
+}
+
+String favoriteKey(const TeamFavorite& favorite) {
+  return normalizedLeague(favorite.league) + ":" + normalizedTeam(favorite.teamId);
 }
 
 String safeString(JsonVariant value, const String& defaultValue = "") {
@@ -102,7 +120,14 @@ uint8_t hexByte(const String& hex, int offset) {
   return (hexNibble(hex[offset]) << 4) | hexNibble(hex[offset + 1]);
 }
 
-uint16_t rowColor(const String& rawHex, const String& league, bool homeRow) {
+Rgb leagueFallbackRgb(const String& league, bool homeRow) {
+  if (league == "nba") return {static_cast<uint8_t>(homeRow ? 10 : 12), static_cast<uint8_t>(homeRow ? 24 : 14), static_cast<uint8_t>(homeRow ? 44 : 18)};
+  if (league == "nfl") return {static_cast<uint8_t>(homeRow ? 8 : 10), static_cast<uint8_t>(homeRow ? 18 : 28), static_cast<uint8_t>(homeRow ? 30 : 22)};
+  if (league == "mlb") return {static_cast<uint8_t>(homeRow ? 8 : 34), static_cast<uint8_t>(homeRow ? 18 : 10), static_cast<uint8_t>(homeRow ? 34 : 12)};
+  return {static_cast<uint8_t>(homeRow ? 20 : 34), static_cast<uint8_t>(homeRow ? 18 : 10), static_cast<uint8_t>(homeRow ? 18 : 12)};
+}
+
+Rgb parseTeamRgb(const String& rawHex, const String& league, bool homeRow) {
   String hex = rawHex;
   hex.trim();
   if (hex.startsWith("#")) hex.remove(0, 1);
@@ -111,14 +136,46 @@ uint16_t rowColor(const String& rawHex, const String& league, bool homeRow) {
     uint8_t g = hexByte(hex, 2);
     uint8_t b = hexByte(hex, 4);
     if (r + g + b > 650 || r + g + b < 35) {
-      return getScaledColor(homeRow ? 32 : 24, homeRow ? 64 : 48, homeRow ? 112 : 80);
+      return leagueFallbackRgb(league, homeRow);
     }
-    return getScaledColor(r / 2, g / 2, b / 2);
+    return {r, g, b};
   }
-  if (league == "nba") return getScaledColor(homeRow ? 28 : 34, homeRow ? 76 : 42, homeRow ? 142 : 52);
-  if (league == "nfl") return getScaledColor(homeRow ? 12 : 18, homeRow ? 38 : 82, homeRow ? 76 : 58);
-  if (league == "mlb") return getScaledColor(homeRow ? 12 : 96, homeRow ? 42 : 18, homeRow ? 90 : 24);
-  return getScaledColor(homeRow ? 34 : 92, homeRow ? 38 : 18, homeRow ? 38 : 34);
+  return leagueFallbackRgb(league, homeRow);
+}
+
+Rgb dimRowRgb(const Rgb& rgb) {
+  return {
+    static_cast<uint8_t>(max<int>(3, rgb.r / 6)),
+    static_cast<uint8_t>(max<int>(3, rgb.g / 6)),
+    static_cast<uint8_t>(max<int>(3, rgb.b / 6)),
+  };
+}
+
+int colorDistanceSq(const Rgb& left, const Rgb& right) {
+  int dr = static_cast<int>(left.r) - static_cast<int>(right.r);
+  int dg = static_cast<int>(left.g) - static_cast<int>(right.g);
+  int db = static_cast<int>(left.b) - static_cast<int>(right.b);
+  return dr * dr + dg * dg + db * db;
+}
+
+bool dominantChannelMatches(const Rgb& left, const Rgb& right) {
+  int leftMax = max<int>(left.r, max<int>(left.g, left.b));
+  int leftMin = min<int>(left.r, min<int>(left.g, left.b));
+  int rightMax = max<int>(right.r, max<int>(right.g, right.b));
+  int rightMin = min<int>(right.r, min<int>(right.g, right.b));
+  if (leftMax - leftMin < 60 || rightMax - rightMin < 60) return false;
+  int leftChannel = left.r >= left.g && left.r >= left.b ? 0 : (left.g >= left.b ? 1 : 2);
+  int rightChannel = right.r >= right.g && right.r >= right.b ? 0 : (right.g >= right.b ? 1 : 2);
+  return leftChannel == rightChannel;
+}
+
+bool logoCollidesWithTeamColor(const String& league, const String& team, const Rgb& rawRowRgb) {
+  uint8_t r;
+  uint8_t g;
+  uint8_t b;
+  if (!sportsLogoDominantColor(league, team, r, g, b)) return false;
+  Rgb logoRgb = {r, g, b};
+  return colorDistanceSq(logoRgb, rawRowRgb) < 9000 || dominantChannelMatches(logoRgb, rawRowRgb);
 }
 
 String fallbackTeamColor(const String& league, const String& team) {
@@ -143,13 +200,32 @@ String fallbackTeamColor(const String& league, const String& team) {
   return "";
 }
 
-uint16_t teamRowColor(const String& colorHex, const String& league, const String& team, bool homeRow) {
+Rgb teamRowRgb(const String& colorHex, const String& league, const String& team, bool homeRow, bool colorBar) {
+  if (!colorBar || team.length() == 0) {
+    return {4, 4, 4};
+  }
   String color = colorHex.length() > 0 ? colorHex : fallbackTeamColor(league, team);
-  return rowColor(color, league, homeRow);
+  Rgb raw = parseTeamRgb(color, league, homeRow);
+  if (logoCollidesWithTeamColor(league, team, raw)) {
+    Serial.println(String("🏟️ Sports logo/bar contrast fallback: ") + league + "/" + team);
+    return {5, 5, 5};
+  }
+  return dimRowRgb(raw);
+}
+
+uint16_t color565(const Rgb& rgb) {
+  return getScaledColor(rgb.r, rgb.g, rgb.b);
 }
 
 uint16_t headerColor() {
   return getScaledColor(255, 165, 0);
+}
+
+void logSportsHeap(const String& label) {
+  Serial.printf("🏟️ Sports heap %s free=%u maxAlloc=%u\n",
+                label.c_str(),
+                static_cast<unsigned>(ESP.getFreeHeap()),
+                static_cast<unsigned>(ESP.getMaxAllocHeap()));
 }
 
 String compactText(const String& value, int maxChars) {
@@ -245,23 +321,82 @@ void drawTinyRightText(const String& text, int y, uint16_t color, int rightX) {
   drawTinyText(text, rightX - tinyTextWidth(text), y, color);
 }
 
-void drawLogoOrFallback(const String& league, const String& team, int x, int y) {
+void drawLogoOrFallback(const String& league, const String& team, int x, int y, bool drawShadow) {
   uint8_t size = sportsLogoRowSize(league, team, 12);
   int yOffset = (12 - size) / 2;
-  if (drawSportsLogo(league, team, x, y + yOffset, size)) return;
+  logSportsHeap(String("before logo ") + league + "/" + team);
+  if (drawShadow) {
+    drawSportsLogoSilhouette(league, team, x - 1, y + yOffset, size, getScaledColor(0, 0, 0));
+    drawSportsLogoSilhouette(league, team, x + 1, y + yOffset, size, getScaledColor(0, 0, 0));
+    drawSportsLogoSilhouette(league, team, x, y + yOffset - 1, size, getScaledColor(0, 0, 0));
+    drawSportsLogoSilhouette(league, team, x, y + yOffset + 1, size, getScaledColor(0, 0, 0));
+  }
+  if (drawSportsLogo(league, team, x, y + yOffset, size)) {
+    logSportsHeap(String("after logo ") + league + "/" + team);
+    return;
+  }
+  Serial.println(String("🏟️ Sports logo missing, using text fallback: ") + league + "/" + team);
   drawTinyText(compactText(team, 2), x + 1, y + 4, getScaledColor(255, 255, 255));
+  logSportsHeap(String("after logo fallback ") + league + "/" + team);
 }
 
 void drawTeamRow(const String& league, const String& team, const String& label, const String& value,
-                 const String& colorHex, bool homeRow, bool winner, int y, int xOffset) {
-  matrix.fillRect(0, y, PANEL_WIDTH, 12, teamRowColor(colorHex, league, team, homeRow));
+                 const String& colorHex, bool homeRow, bool winner, int y, int xOffset, bool colorBar) {
+  Rgb rowRgb = teamRowRgb(colorHex, league, team, homeRow, colorBar);
+  matrix.fillRect(0, y, PANEL_WIDTH, 12, color565(rowRgb));
   matrix.drawFastHLine(0, y, PANEL_WIDTH, getScaledColor(16, 16, 16));
-  drawLogoOrFallback(league, team, xOffset + 1, y);
+  drawLogoOrFallback(league, team, xOffset + 1, y, colorBar);
 
   matrix.setTextColor(winner ? getScaledColor(255, 255, 0) : getScaledColor(255, 255, 255));
   drawTinyText(label, 16 + xOffset, y + 4, winner ? getScaledColor(255, 255, 0) : getScaledColor(255, 255, 255));
 
   drawTinyRightText(value, y + 4, winner ? getScaledColor(255, 255, 0) : getScaledColor(255, 255, 255), 62 + xOffset);
+}
+
+void drawTimeoutDots(int count, int x, int y, uint16_t color) {
+  if (count < 0) return;
+  int visible = min<int>(count, 3);
+  for (int i = 0; i < 3; ++i) {
+    matrix.drawPixel(x + i * 2, y, i < visible ? color : getScaledColor(24, 24, 24));
+  }
+}
+
+void drawBaseDiamond(const SportsSnapshot& snapshot, int x, int y) {
+  uint16_t occupied = getScaledColor(255, 220, 40);
+  uint16_t empty = getScaledColor(54, 54, 54);
+  matrix.drawPixel(x + 3, y, snapshot.baseOccupied[1] ? occupied : empty);
+  matrix.drawPixel(x + 5, y + 2, snapshot.baseOccupied[0] ? occupied : empty);
+  matrix.drawPixel(x + 1, y + 2, snapshot.baseOccupied[2] ? occupied : empty);
+}
+
+void drawLiveExtras(const SportsSnapshot& snapshot, int xOffset) {
+  if (snapshot.state != "in") return;
+  int x = 25 + xOffset;
+  if (snapshot.league == "mlb" && snapshot.hasBaseState) {
+    drawBaseDiamond(snapshot, x + 4, 2);
+    return;
+  }
+  if (snapshot.league == "nhl" && snapshot.hasPowerPlay) {
+    drawTinyText("PP", x + 4, 1, getScaledColor(255, 220, 40));
+    return;
+  }
+  if (snapshot.league == "nfl") {
+    if (snapshot.liveExtra.length() > 0) {
+      drawTinyText(compactText(snapshot.liveExtra, 4), x, 1, getScaledColor(255, 255, 255));
+    }
+    if (snapshot.teamTimeouts >= 0) {
+      drawTimeoutDots(snapshot.teamTimeouts, x + 18, 6, getScaledColor(255, 255, 255));
+    }
+    return;
+  }
+  if (snapshot.league == "nba") {
+    if (snapshot.teamFouls >= 0) {
+      drawTinyText("F" + String(snapshot.teamFouls), x, 1, getScaledColor(255, 255, 255));
+    }
+    if (snapshot.teamTimeouts >= 0) {
+      drawTimeoutDots(snapshot.teamTimeouts, x + 12, 6, getScaledColor(255, 255, 255));
+    }
+  }
 }
 
 String espnUrl(const String& league, const String& teamId) {
@@ -301,6 +436,120 @@ String recordFrom(JsonObject competitor) {
     return safeString(records[0]["summary"], "");
   }
   return "";
+}
+
+int intFrom(JsonVariant value, int defaultValue = -1) {
+  if (value.isNull()) return defaultValue;
+  if (value.is<int>() || value.is<long>()) return value.as<int>();
+  if (value.is<float>() || value.is<double>()) return static_cast<int>(value.as<float>());
+  const char* raw = value.as<const char*>();
+  if (raw == nullptr || strlen(raw) == 0) return defaultValue;
+  return String(raw).toInt();
+}
+
+int statIntFrom(JsonObject competitor, const char* nameA, const char* nameB = nullptr) {
+  JsonArray stats = competitor["statistics"].as<JsonArray>();
+  if (stats.isNull()) return -1;
+  for (JsonVariant v : stats) {
+    JsonObject stat = v.as<JsonObject>();
+    String name = safeString(stat["name"], "");
+    String abbr = safeString(stat["abbreviation"], "");
+    name.toLowerCase();
+    abbr.toLowerCase();
+    String a(nameA);
+    a.toLowerCase();
+    String b = nameB == nullptr ? "" : String(nameB);
+    b.toLowerCase();
+    if (name == a || abbr == a || (b.length() > 0 && (name == b || abbr == b))) {
+      return intFrom(stat["value"], intFrom(stat["displayValue"], -1));
+    }
+  }
+  return -1;
+}
+
+int timeoutFrom(JsonObject competitor) {
+  int direct = intFrom(competitor["timeouts"], -1);
+  if (direct >= 0) return direct;
+  direct = intFrom(competitor["timeoutsRemaining"], -1);
+  if (direct >= 0) return direct;
+  return statIntFrom(competitor, "timeouts", "to");
+}
+
+int foulsFrom(JsonObject competitor) {
+  int direct = intFrom(competitor["fouls"], -1);
+  if (direct >= 0) return direct;
+  direct = intFrom(competitor["teamFouls"], -1);
+  if (direct >= 0) return direct;
+  return statIntFrom(competitor, "fouls", "f");
+}
+
+void parseLiveExtras(JsonObject competition, JsonObject favorite, JsonObject opponent, SportsSnapshot& snapshot) {
+  JsonObject situation = competition["situation"].as<JsonObject>();
+  if (snapshot.league == "mlb") {
+    if (!situation.isNull()) {
+      snapshot.baseOccupied[0] = situation["onFirst"] | false;
+      snapshot.baseOccupied[1] = situation["onSecond"] | false;
+      snapshot.baseOccupied[2] = situation["onThird"] | false;
+      snapshot.hasBaseState = situation.containsKey("onFirst") ||
+                              situation.containsKey("onSecond") ||
+                              situation.containsKey("onThird");
+    }
+    if (!snapshot.hasBaseState) {
+      Serial.println(String("🏟️ ESPN MLB base occupancy unavailable for ") + snapshot.teamAbbr);
+    }
+  }
+
+  if (snapshot.league == "nhl") {
+    if (!situation.isNull()) {
+      snapshot.hasPowerPlay = situation["powerPlay"] | false;
+      if (!snapshot.hasPowerPlay) {
+        snapshot.hasPowerPlay = situation["isPowerPlay"] | false;
+      }
+    }
+    if (!snapshot.hasPowerPlay) {
+      Serial.println(String("🏟️ ESPN NHL power play unavailable/inactive for ") + snapshot.teamAbbr);
+    }
+  }
+
+  if (snapshot.league == "nba") {
+    snapshot.teamTimeouts = timeoutFrom(favorite);
+    snapshot.opponentTimeouts = timeoutFrom(opponent);
+    snapshot.teamFouls = foulsFrom(favorite);
+    snapshot.opponentFouls = foulsFrom(opponent);
+    if (snapshot.teamTimeouts < 0 && snapshot.opponentTimeouts < 0) {
+      Serial.println(String("🏟️ ESPN NBA timeouts unavailable for ") + snapshot.teamAbbr);
+    }
+    if (snapshot.teamFouls < 0 && snapshot.opponentFouls < 0) {
+      Serial.println(String("🏟️ ESPN NBA fouls unavailable for ") + snapshot.teamAbbr);
+    }
+  }
+
+  if (snapshot.league == "nfl") {
+    snapshot.liveExtra = pickString(situation["shortDownDistanceText"], situation["downDistanceText"], "");
+    if (snapshot.liveExtra.length() == 0) {
+      String down = variantToString(situation["down"], "");
+      String distance = variantToString(situation["distance"], "");
+      if (down.length() > 0 && distance.length() > 0) {
+        snapshot.liveExtra = down + "&" + distance;
+      }
+    }
+    snapshot.teamTimeouts = timeoutFrom(favorite);
+    snapshot.opponentTimeouts = timeoutFrom(opponent);
+    String possession = normalizedTeam(safeString(situation["possession"], ""));
+    if (possession.length() == 0) {
+      possession = normalizedTeam(safeString(situation["possessionText"], ""));
+    }
+    if (possession.length() > 0) {
+      snapshot.possessionAbbr = compactText(possession, 3);
+      snapshot.hasPossession = true;
+    }
+    if (snapshot.liveExtra.length() == 0) {
+      Serial.println(String("🏟️ ESPN NFL down/distance unavailable for ") + snapshot.teamAbbr);
+    }
+    if (snapshot.teamTimeouts < 0 && snapshot.opponentTimeouts < 0) {
+      Serial.println(String("🏟️ ESPN NFL timeouts unavailable for ") + snapshot.teamAbbr);
+    }
+  }
 }
 
 String shortStatus(JsonObject event, const String& state) {
@@ -360,9 +609,10 @@ bool parseEspnEvent(JsonObject event, const String& league, const String& teamId
   snapshot.teamColor = teamColorFrom(favorite["team"].as<JsonObject>());
   snapshot.opponentColor = teamColorFrom(opponent["team"].as<JsonObject>());
   snapshot.gameTimeUtc = safeString(event["date"], "");
+  parseLiveExtras(competition, favorite, opponent, snapshot);
 
-  Serial.println("🏟️ ESPN selected " + snapshot.opponentAbbr + " vs " + snapshot.teamAbbr);
-  Serial.println("🏟️ ESPN scores/status " + snapshot.opponentScore + "-" + snapshot.teamScore + " " + snapshot.status);
+  Serial.println(String("🏟️ ESPN selected ") + snapshot.opponentAbbr + " vs " + snapshot.teamAbbr);
+  Serial.println(String("🏟️ ESPN scores/status ") + snapshot.opponentScore + "-" + snapshot.teamScore + " " + snapshot.status);
   return true;
 }
 
@@ -376,25 +626,65 @@ int snapshotRank(const SportsSnapshot& snapshot) {
 bool fetchSnapshotFromEspn(const TeamFavorite& favorite, SportsSnapshot& snapshot) {
   String league = normalizedLeague(favorite.league);
   String teamId = normalizedTeam(favorite.teamId);
+  String key = league + ":" + teamId;
+  unsigned long now = millis();
+  auto retryIt = sportsFetchRetryAfter.find(key);
+  if (retryIt != sportsFetchRetryAfter.end() && now < retryIt->second) {
+    Serial.println(String("🏟️ ESPN backoff active for ") + key);
+    return false;
+  }
+
   String url = espnUrl(league, teamId);
-  Serial.println("🏟️ ESPN request: " + url);
+  Serial.println(String("🏟️ ESPN request: ") + url);
+  logSportsHeap(String("before ESPN fetch ") + key);
 
   HTTPClient http;
+  http.setTimeout(8000);
   http.begin(url);
   int status = http.GET();
   Serial.printf("🏟️ ESPN HTTP status: %d\n", status);
   if (status != HTTP_CODE_OK) {
     http.end();
+    sportsFetchRetryAfter[key] = millis() + kFetchFailureBackoffMs;
+    logSportsHeap(String("after ESPN HTTP failure ") + key);
     return false;
   }
 
-  String body = http.getString();
-  http.end();
+  StaticJsonDocument<2048> filter;
+  filter["events"][0]["date"] = true;
+  filter["events"][0]["status"]["type"]["state"] = true;
+  filter["events"][0]["status"]["type"]["shortDetail"] = true;
+  filter["events"][0]["status"]["type"]["detail"] = true;
+  filter["events"][0]["competitions"][0]["situation"] = true;
+  filter["events"][0]["competitions"][0]["competitors"][0]["homeAway"] = true;
+  filter["events"][0]["competitions"][0]["competitors"][0]["score"] = true;
+  filter["events"][0]["competitions"][0]["competitors"][0]["timeouts"] = true;
+  filter["events"][0]["competitions"][0]["competitors"][0]["timeoutsRemaining"] = true;
+  filter["events"][0]["competitions"][0]["competitors"][0]["fouls"] = true;
+  filter["events"][0]["competitions"][0]["competitors"][0]["teamFouls"] = true;
+  filter["events"][0]["competitions"][0]["competitors"][0]["team"]["abbreviation"] = true;
+  filter["events"][0]["competitions"][0]["competitors"][0]["team"]["shortDisplayName"] = true;
+  filter["events"][0]["competitions"][0]["competitors"][0]["team"]["displayName"] = true;
+  filter["events"][0]["competitions"][0]["competitors"][0]["team"]["color"] = true;
+  filter["events"][0]["competitions"][0]["competitors"][0]["team"]["alternateColor"] = true;
+  filter["events"][0]["competitions"][0]["competitors"][0]["records"][0]["summary"] = true;
+  filter["events"][0]["competitions"][0]["competitors"][0]["statistics"][0]["name"] = true;
+  filter["events"][0]["competitions"][0]["competitors"][0]["statistics"][0]["abbreviation"] = true;
+  filter["events"][0]["competitions"][0]["competitors"][0]["statistics"][0]["value"] = true;
+  filter["events"][0]["competitions"][0]["competitors"][0]["statistics"][0]["displayValue"] = true;
 
-  DynamicJsonDocument doc(32768);
-  DeserializationError error = deserializeJson(doc, body);
+  DynamicJsonDocument doc(24576);
+  logSportsHeap(String("before ESPN parse ") + key);
+  DeserializationError error = deserializeJson(
+    doc,
+    *http.getStreamPtr(),
+    DeserializationOption::Filter(filter)
+  );
+  http.end();
+  logSportsHeap(String("after ESPN parse ") + key);
   if (error) {
     Serial.println("🏟️ ESPN JSON parse failed: " + String(error.c_str()));
+    sportsFetchRetryAfter[key] = millis() + kFetchFailureBackoffMs;
     return false;
   }
 
@@ -419,8 +709,9 @@ bool fetchSnapshotFromEspn(const TeamFavorite& favorite, SportsSnapshot& snapsho
 
   if (found) {
     snapshot = best;
-    Serial.println("🏟️ ESPN selected final " + snapshot.opponentAbbr + " " + snapshot.homeAway + " " + snapshot.teamAbbr);
-    Serial.println("🏟️ ESPN parsed scores/status " + snapshot.opponentScore + "-" + snapshot.teamScore + " " + snapshot.status);
+    sportsFetchRetryAfter.erase(key);
+    Serial.println(String("🏟️ ESPN selected final ") + snapshot.opponentAbbr + " " + snapshot.homeAway + " " + snapshot.teamAbbr);
+    Serial.println(String("🏟️ ESPN parsed scores/status ") + snapshot.opponentScore + "-" + snapshot.teamScore + " " + snapshot.status);
     return true;
   }
   snapshot.league = league;
@@ -431,7 +722,8 @@ bool fetchSnapshotFromEspn(const TeamFavorite& favorite, SportsSnapshot& snapsho
   snapshot.status = "NO GAME";
   snapshot.detail = "NO GAME";
   snapshot.teamColor = fallbackTeamColor(league, teamId);
-  Serial.println("🏟️ ESPN no matching game for " + league + "/" + teamId);
+  Serial.println(String("🏟️ ESPN no matching game for ") + league + "/" + teamId);
+  sportsFetchRetryAfter.erase(key);
   return true;
 }
 
@@ -441,6 +733,8 @@ bool loadSnapshot(const TeamFavorite& favorite) {
   if (snapshot.fetchedAt != 0 && millis() - snapshot.fetchedAt < kRefreshIntervalMs) {
     return true;
   }
+
+  logSportsHeap(String("before loadSnapshot ") + key);
 
   snapshot.league = normalizedLeague(favorite.league);
   snapshot.teamId = normalizedTeam(favorite.teamId);
@@ -459,6 +753,16 @@ bool loadSnapshot(const TeamFavorite& favorite) {
   snapshot.teamColor = "";
   snapshot.opponentColor = "";
   snapshot.gameTimeUtc = "";
+  snapshot.liveExtra = "";
+  snapshot.possessionAbbr = "";
+  snapshot.hasBaseState = false;
+  snapshot.hasPowerPlay = false;
+  snapshot.hasPossession = false;
+  snapshot.teamTimeouts = -1;
+  snapshot.opponentTimeouts = -1;
+  snapshot.teamFouls = -1;
+  snapshot.opponentFouls = -1;
+  for (int i = 0; i < 3; ++i) snapshot.baseOccupied[i] = false;
 
   bool loadedFromCache = false;
   String path = "/novaFrame/cache/sports/" + snapshot.league + "/" + snapshot.teamId;
@@ -483,18 +787,55 @@ bool loadSnapshot(const TeamFavorite& favorite) {
       snapshot.teamColor = pickString(doc["teamColor"], doc["primaryColor"], "");
       snapshot.opponentColor = pickString(doc["opponentColor"], doc["opponentPrimaryColor"], "");
       snapshot.gameTimeUtc = pickString(doc["gameTimeUtc"], doc["startTime"], "");
+      snapshot.liveExtra = pickString(doc["liveExtra"], doc["downDistance"], "");
+      snapshot.possessionAbbr = normalizedTeam(pickString(doc["possessionAbbr"], doc["possession"], ""));
+      snapshot.hasPossession = snapshot.possessionAbbr.length() > 0;
+      snapshot.hasBaseState = doc["hasBaseState"] | false;
+      snapshot.baseOccupied[0] = doc["onFirst"] | false;
+      snapshot.baseOccupied[1] = doc["onSecond"] | false;
+      snapshot.baseOccupied[2] = doc["onThird"] | false;
+      snapshot.hasPowerPlay = doc["hasPowerPlay"] | false;
+      snapshot.teamTimeouts = doc["teamTimeouts"] | -1;
+      snapshot.opponentTimeouts = doc["opponentTimeouts"] | -1;
+      snapshot.teamFouls = doc["teamFouls"] | -1;
+      snapshot.opponentFouls = doc["opponentFouls"] | -1;
       loadedFromCache = snapshot.opponentAbbr.length() > 0 || snapshot.state == "no_game";
-      Serial.println("🏟️ Sports cache loaded: " + snapshot.league + "/" + snapshot.teamId + " " + snapshot.status);
+      Serial.println(String("🏟️ Sports cache loaded: ") + snapshot.league + "/" + snapshot.teamId + " " + snapshot.status);
     }
   }
 
   if (!loadedFromCache) {
-    Serial.println("🏟️ Sports cache miss/no data: " + snapshot.league + "/" + snapshot.teamId);
+    Serial.println(String("🏟️ Sports cache miss/no data: ") + snapshot.league + "/" + snapshot.teamId);
     fetchSnapshotFromEspn(favorite, snapshot);
   }
 
   snapshot.fetchedAt = millis();
+  logSportsHeap(String("after loadSnapshot ") + key);
   return true;
+}
+
+void pruneSnapshots(const AppConfig& config, const String& leagueId) {
+  String prefix = normalizedLeague(leagueId) + ":";
+  for (auto it = sportsSnapshots.begin(); it != sportsSnapshots.end();) {
+    if (!it->first.startsWith(prefix)) {
+      ++it;
+      continue;
+    }
+    bool keep = false;
+    for (const TeamFavorite& favorite : config.favorites) {
+      if (it->first == favoriteKey(favorite)) {
+        keep = true;
+        break;
+      }
+    }
+    if (keep) {
+      ++it;
+    } else {
+      Serial.println(String("🏟️ Sports prune snapshot: ") + it->first);
+      sportsFetchRetryAfter.erase(it->first);
+      it = sportsSnapshots.erase(it);
+    }
+  }
 }
 
 }  // namespace
@@ -511,6 +852,7 @@ void SportsApp::init() {
 void SportsApp::loop() {
   const AppConfig* config = getAppConfig(getAppId());
   if (config == nullptr || config->favorites.empty()) return;
+  pruneSnapshots(*config, getAppId());
 
   if (currentFavoriteIndex >= static_cast<int>(config->favorites.size())) {
     currentFavoriteIndex = 0;
@@ -518,17 +860,32 @@ void SportsApp::loop() {
   }
 
   if (millis() - lastRotateAt >= kRotateIntervalMs && config->favorites.size() > 1) {
+    logSportsHeap(String("before rotation ") + getAppId());
     currentFavoriteIndex = (currentFavoriteIndex + 1) % config->favorites.size();
     lastRotateAt = millis();
     setNeedsRedraw(true);
+    Serial.printf("🏟️ Sports rotation %s index=%d/%d\n",
+                  getAppId().c_str(),
+                  currentFavoriteIndex,
+                  static_cast<int>(config->favorites.size()));
+    logSportsHeap(String("after rotation ") + getAppId());
   }
 
-  loadSnapshot(config->favorites[currentFavoriteIndex]);
+  const TeamFavorite& favorite = config->favorites[currentFavoriteIndex];
+  String key = favoriteKey(favorite);
+  bool refreshDue = sportsSnapshots.find(key) == sportsSnapshots.end() ||
+                    sportsSnapshots[key].fetchedAt == 0 ||
+                    millis() - sportsSnapshots[key].fetchedAt >= kRefreshIntervalMs;
+  loadSnapshot(favorite);
+  if (refreshDue) {
+    setNeedsRedraw(true);
+  }
 }
 
 void SportsApp::redraw(bool force, int xOffset) {
   if (!force && !getNeedsRedraw()) return;
 
+  logSportsHeap(String("before render ") + getAppId());
   matrix.fillScreen(0);
   const AppConfig* config = getAppConfig(getAppId());
   if (config == nullptr || config->favorites.empty()) {
@@ -538,8 +895,11 @@ void SportsApp::redraw(bool force, int xOffset) {
     matrix.print(leagueLabel);
     drawSmallText("Set teams", 2 + xOffset, 20);
     setNeedsRedraw(false);
+    logSportsHeap(String("after render empty ") + getAppId());
     return;
   }
+  bool colorBar = config->sportsDisplayStyle != "noBar";
+  Serial.println(String("🏟️ Sports displayStyle ") + getAppId() + "=" + config->sportsDisplayStyle);
 
   const TeamFavorite& favorite = config->favorites[currentFavoriteIndex];
   loadSnapshot(favorite);
@@ -600,11 +960,13 @@ void SportsApp::redraw(bool force, int xOffset) {
 
   String header = snapshot.detail.length() > 0 ? snapshot.detail : snapshot.status;
   drawTinyRightText(compactText(header, 10), 1, getScaledColor(255, 255, 255), 62 + xOffset);
+  drawLiveExtras(snapshot, xOffset);
 
-  drawTeamRow(snapshot.league, awayTeam, awayLabel, awayValue, awayColor, false, awayWinner, 8, xOffset);
-  drawTeamRow(snapshot.league, homeTeam, homeLabel, homeValue, homeColor, true, homeWinner, 20, xOffset);
+  drawTeamRow(snapshot.league, awayTeam, awayLabel, awayValue, awayColor, false, awayWinner, 8, xOffset, colorBar);
+  drawTeamRow(snapshot.league, homeTeam, homeLabel, homeValue, homeColor, true, homeWinner, 20, xOffset, colorBar);
 
   setNeedsRedraw(false);
+  logSportsHeap(String("after render ") + getAppId());
 }
 
 void SportsApp::setNeedsRedraw(bool flag) {

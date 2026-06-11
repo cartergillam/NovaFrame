@@ -17,6 +17,7 @@ Output layout:
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 import re
@@ -48,6 +49,8 @@ class Logo:
     source: Path
     status: str
     notes: str
+    row_size: int
+    row_size_source: str
     normalized: Image.Image
     quantized: Image.Image
     layers: tuple[Layer, ...]
@@ -63,6 +66,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-colors", type=int, default=5)
     parser.add_argument("--alpha-threshold", type=int, default=48)
     parser.add_argument("--min-layer-pixels", type=int, default=2)
+    parser.add_argument("--default-row-size", type=int, default=12)
     parser.add_argument("--review-manifest", type=Path, default=DEFAULT_REVIEW_MANIFEST)
     parser.add_argument("--no-cpp", action="store_true", help="Skip generated C++ output.")
     return parser.parse_args()
@@ -111,6 +115,13 @@ def override_int(entry: dict[str, Any], key: str, default: int) -> int:
     if not isinstance(value, int):
         raise ValueError(f"Override '{key}' must be an integer")
     return value
+
+
+def override_int_with_source(entry: dict[str, Any], key: str, default: int) -> tuple[int, str]:
+    overrides = entry.get("overrides", {})
+    if not isinstance(overrides, dict) or key not in overrides:
+        return default, "default"
+    return override_int(entry, key, default), "override"
 
 
 def override_source(entry: dict[str, Any], root: Path, default: Path) -> Path:
@@ -313,11 +324,12 @@ def write_pngs(logo: Logo, output_dir: Path) -> None:
 
     for index, layer in enumerate(logo.layers):
         mask = Image.new("L", logo.normalized.size, 0)
-        draw = ImageDraw.Draw(mask)
+        data = [0] * (logo.normalized.width * logo.normalized.height)
         for x, y in layer.pixels:
-            draw.point((x, y), fill=255)
+            data[y * logo.normalized.width + x] = 255
+        mask.putdata(data)
         hex_color = color_hex(layer.color)
-        mask.convert("RGBA").save(masks_dir / f"layer_{index:02d}_{hex_color}.png")
+        mask.save(masks_dir / f"layer_{index:02d}_{hex_color}.png")
 
 
 def clean_output_dir(output_dir: Path) -> None:
@@ -325,7 +337,7 @@ def clean_output_dir(output_dir: Path) -> None:
         path = output_dir / name
         if path.exists():
             shutil.rmtree(path)
-    for name in ("contact_sheet.png", "SportsLogosGenerated.h", "SportsLogosGenerated.cpp"):
+    for name in ("contact_sheet.png", "logo_bounds_report.csv", "SportsLogosGenerated.h", "SportsLogosGenerated.cpp"):
         path = output_dir / name
         if path.exists():
             path.unlink()
@@ -357,6 +369,60 @@ def pack_bitmap(layer: Layer, size: int) -> list[int]:
     return data
 
 
+def sampled_layer_pixel_set(layer: Layer, source_size: int, out_x: int, out_y: int, out_size: int) -> bool:
+    start_x = out_x * source_size // out_size
+    end_x = (out_x + 1) * source_size // out_size
+    start_y = out_y * source_size // out_size
+    end_y = (out_y + 1) * source_size // out_size
+    if end_x <= start_x:
+        end_x = start_x + 1
+    if end_y <= start_y:
+        end_y = start_y + 1
+
+    for y in range(start_y, min(end_y, source_size)):
+        for x in range(start_x, min(end_x, source_size)):
+            if (x, y) in layer.pixels:
+                return True
+    return False
+
+
+def rendered_visible_bbox(logo: Logo, source_size: int) -> tuple[int, int, bool]:
+    row_size = logo.row_size
+    if row_size <= 0:
+        return 0, 0, True
+
+    visible: list[tuple[int, int]] = []
+    for y in range(row_size):
+        for x in range(row_size):
+            if any(sampled_layer_pixel_set(layer, source_size, x, y, row_size) for layer in logo.layers):
+                visible.append((x, y))
+
+    if not visible:
+        return 0, 0, True
+    xs = [x for x, _ in visible]
+    ys = [y for _, y in visible]
+    width = max(xs) - min(xs) + 1
+    height = max(ys) - min(ys) + 1
+    return width, height, width <= 12 and height <= 12
+
+
+def write_bounds_report(logos: list[Logo], output_dir: Path, size: int) -> None:
+    with (output_dir / "logo_bounds_report.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["league", "team", "visibleWidth", "visibleHeight", "status", "rowSize", "overrideSource"])
+        for logo in logos:
+            width, height, passes = rendered_visible_bbox(logo, size)
+            writer.writerow([
+                logo.league,
+                logo.team,
+                width,
+                height,
+                "pass" if passes else "fail",
+                logo.row_size,
+                logo.row_size_source,
+            ])
+
+
 def write_cpp(logos: list[Logo], output_dir: Path, size: int) -> None:
     header = output_dir / "SportsLogosGenerated.h"
     source = output_dir / "SportsLogosGenerated.cpp"
@@ -377,6 +443,7 @@ struct SportsLogoDef {
   const char* team;
   uint8_t width;
   uint8_t height;
+  uint8_t rowSize;
   uint8_t layerCount;
   const SportsLogoLayerDef* layers;
 };
@@ -424,7 +491,7 @@ extern const size_t SPORTS_LOGO_COUNT;
     for logo in logos:
         layer_name = identifier("layers", logo.league, logo.team)
         lines.append(
-            f'  {{ "{logo.league}", "{logo.team}", {size}, {size}, {len(logo.layers)}, {layer_name} }},'
+            f'  {{ "{logo.league}", "{logo.team}", {size}, {size}, {logo.row_size}, {len(logo.layers)}, {layer_name} }},'
         )
     lines.extend(
         [
@@ -499,6 +566,9 @@ def main() -> int:
         padding = override_int(entry, "padding", args.padding)
         max_colors = override_int(entry, "maxColors", args.max_colors)
         alpha_threshold = override_int(entry, "alphaThreshold", args.alpha_threshold)
+        row_size, row_size_source = override_int_with_source(entry, "rowSize", args.default_row_size)
+        if row_size < 1 or row_size > args.default_row_size:
+            raise ValueError(f"rowSize for {league.upper()} {team} must be between 1 and {args.default_row_size}")
 
         normalized = normalize_image(source_path, args.size, padding, alpha_threshold)
         quantized, layers = cluster_layers(
@@ -507,11 +577,12 @@ def main() -> int:
             alpha_threshold,
             args.min_layer_pixels,
         )
-        logo = Logo(league, team, source_path, status, notes, normalized, quantized, layers)
+        logo = Logo(league, team, source_path, status, notes, row_size, row_size_source, normalized, quantized, layers)
         write_pngs(logo, output_dir)
         logos.append(logo)
 
     write_contact_sheet(logos, output_dir, args.size)
+    write_bounds_report(logos, output_dir, args.size)
     if not args.no_cpp:
         args.cpp_dir.mkdir(parents=True, exist_ok=True)
         write_cpp(logos, args.cpp_dir, args.size)
